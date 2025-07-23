@@ -44,3 +44,9 @@ yarn-error.log*
 
 # idea files
 .idea
+
+/venv
+/.cache
+/demo_comparison
+/processed
+/downloads
