@@ -79,7 +79,7 @@ class SegmentSearcher:
                 query_embedding = self.embedding_model.encode([query])[0].tolist()
             elif self.embedding_type == "openai":
                 response = self.openai_client.embeddings.create(
-                    model="text-embedding-3-small",
+                    model="text-embedding-3-large",
                     input=[query]
                 )
                 query_embedding = response.data[0].embedding
@@ -101,6 +101,8 @@ class SegmentSearcher:
                     "timestamp": match.metadata.get("timestamp_readable", ""),
                     "start_time": match.metadata.get("start_time", 0),
                     "duration": match.metadata.get("duration", 0),
+                    "emotion": match.metadata.get("primary_emotion", ""),
+                    "primary_emotion_score": match.metadata.get("primary_emotion_score", -1),
                     "text": match.metadata.get("text", "")
                 }
                 formatted_results.append(result)
@@ -267,6 +269,7 @@ class SegmentSearcher:
             print(f"\n🎬 Result {i} - Score: {result['score']:.3f}")
             print(f"📺 Video: {result['video_name']}")
             print(f"⏰ Time: {result['timestamp']} ({result['duration']:.1f}s)")
+            print(f"🎭 Emotion: {result['emotion']} (Score: {result['primary_emotion_score']:.2f})")
             if result['video_url'] != "":
                 # Create timestamped YouTube URL
                 start_seconds = int(result['start_time'])

@@ -3,11 +3,12 @@
 Video Processing Pipeline
 
 Extracts transcripts using Whisper, groups segments based on semantic similarity,
-and stores embeddings in Pinecone for semantic search.
+analyzes emotions using GoEmotions, and stores embeddings in Pinecone for semantic search.
 
 Features:
 - Whisper-based transcript extraction with timestamps
 - Semantic segmentation (1-2 minute segments)
+- GoEmotions-based emotion detection for each segment
 - OpenAI embeddings for similarity analysis
 - Pinecone vector storage
 - Batch processing of downloaded videos
@@ -32,6 +33,7 @@ from pinecone import Pinecone, ServerlessSpec
 import ffmpeg
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
+from transformers import pipeline
 
 # Load environment variables
 load_dotenv()
@@ -42,7 +44,8 @@ class VideoProcessor:
                  output_dir: str = "./processed",
                  pinecone_index_name: str = "video-segments",
                  embedding_type: str = "local",
-                 local_model_name: str = "all-MiniLM-L6-v2"):
+                 local_model_name: str = "all-MiniLM-L6-v2",
+                 enable_emotion_analysis: bool = True):
         """
         Initialize the video processor.
         
@@ -52,6 +55,7 @@ class VideoProcessor:
             pinecone_index_name: Name for the Pinecone index
             embedding_type: "local" or "openai" for embedding method
             local_model_name: Name of local sentence transformer model
+            enable_emotion_analysis: Whether to enable emotion detection using GoEmotions
         """
         self.downloads_dir = Path(downloads_dir)
         self.output_dir = Path(output_dir)
@@ -61,6 +65,7 @@ class VideoProcessor:
         (self.output_dir / "transcripts").mkdir(exist_ok=True)
         (self.output_dir / "segments").mkdir(exist_ok=True)
         (self.output_dir / "embeddings").mkdir(exist_ok=True)
+        (self.output_dir / "emotions").mkdir(exist_ok=True)
         
         # Initialize models and clients
         print("🔄 Loading Whisper model...")
@@ -81,10 +86,31 @@ class VideoProcessor:
             print("🔄 Initializing OpenAI client...")
             self.openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
             self.embedding_model = None
-            self.embedding_dimensions = 1536  # OpenAI text-embedding-3-small dimensions
+            self.embedding_dimensions = 3072  # OpenAI text-embedding-3-large dimensions
             print("✅ OpenAI client initialized")
         else:
             raise ValueError(f"Invalid embedding_type: {embedding_type}. Use 'local' or 'openai'")
+        
+        # Emotion analysis configuration
+        self.enable_emotion_analysis = enable_emotion_analysis
+        if enable_emotion_analysis:
+            print("🔄 Loading GoEmotions emotion analysis model...")
+            try:
+                self.emotion_classifier = pipeline(
+                    task="text-classification",
+                    model="SamLowe/roberta-base-go_emotions",
+                    top_k=None,
+                    device=-1  # Use CPU; set to 0 for GPU if available
+                )
+                print("✅ GoEmotions model loaded successfully")
+            except Exception as e:
+                print(f"⚠️ Warning: Could not load emotion model: {e}")
+                print("   Emotion analysis will be disabled")
+                self.enable_emotion_analysis = False
+                self.emotion_classifier = None
+        else:
+            self.emotion_classifier = None
+            print("ℹ️ Emotion analysis disabled")
         
         print("🔄 Connecting to Pinecone...")
         self.pinecone_client = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
@@ -352,6 +378,120 @@ class VideoProcessor:
         print(f"✅ Created and saved {len(processed_segments)} semantic segments")
         return processed_segments
 
+    def analyze_emotions(self, segments: List[Dict[str, Any]], force_reprocess: bool = False) -> List[Dict[str, Any]]:
+        """
+        Analyze emotions for semantic segments using GoEmotions.
+        
+        Args:
+            segments: List of semantic segments
+            force_reprocess: If True, reprocess even if emotions exist
+            
+        Returns:
+            Segments with emotion analysis added
+        """
+        if not segments or not self.enable_emotion_analysis:
+            print("ℹ️ Emotion analysis skipped (disabled or no segments)")
+            return segments
+            
+        video_path = Path(segments[0]['video_path'])
+        emotions_file = self.output_dir / "emotions" / f"{video_path.stem}_emotions.json"
+        
+        # Check if emotions already exist
+        if emotions_file.exists() and not force_reprocess:
+            print(f"📄 Loading existing emotion analysis: {video_path.name}")
+            try:
+                with open(emotions_file, "r", encoding="utf-8") as f:
+                    existing_emotions = json.load(f)
+                
+                # Validate emotions have required fields and match current segments
+                if (existing_emotions and 
+                    len(existing_emotions) == len(segments) and
+                    all(key in existing_emotions[0] for key in ["emotions", "primary_emotion", "emotion_scores"])):
+                    print(f"✅ Emotion analysis loaded: {len(existing_emotions)} segments")
+                    return existing_emotions
+                else:
+                    print("⚠️ Existing emotion analysis incompatible or incomplete, reprocessing...")
+                    
+            except (json.JSONDecodeError, FileNotFoundError) as e:
+                print(f"⚠️ Error loading existing emotion analysis: {e}, reprocessing...")
+        
+        print(f"😊 Analyzing emotions for {len(segments)} segments using GoEmotions...")
+        
+        try:
+            # Prepare texts for emotion analysis
+            texts = [seg["text"] for seg in segments]
+            
+            # Process in batches to manage memory and API limits
+            batch_size = 10
+            all_emotion_results = []
+            
+            for i in range(0, len(texts), batch_size):
+                batch_texts = texts[i:i + batch_size]
+                print(f"  Processing emotion batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
+                
+                # Get emotion predictions for batch
+                batch_results = self.emotion_classifier(batch_texts)
+                all_emotion_results.extend(batch_results)
+            
+            # Add emotion analysis to segments
+            segments_with_emotions = []
+            for i, segment in enumerate(segments):
+                segment_with_emotions = segment.copy()
+                emotion_data = all_emotion_results[i]
+                
+                # Process emotion results
+                emotions = {}
+                emotion_scores = {}
+                for emotion_result in emotion_data:
+                    emotion_label = emotion_result['label']
+                    emotion_score = emotion_result['score']
+                    emotions[emotion_label] = emotion_score
+                    emotion_scores[emotion_label] = float(emotion_score)
+                
+                # Find primary emotion (highest score)
+                primary_emotion = max(emotions.items(), key=lambda x: x[1])
+                
+                # Add emotion data to segment
+                segment_with_emotions["emotions"] = emotions
+                segment_with_emotions["primary_emotion"] = primary_emotion[0]
+                segment_with_emotions["primary_emotion_score"] = float(primary_emotion[1])
+                segment_with_emotions["emotion_scores"] = emotion_scores
+                segment_with_emotions["emotion_analysis_model"] = "SamLowe/roberta-base-go_emotions"
+                segment_with_emotions["emotion_analysis_timestamp"] = datetime.now().isoformat()
+                
+                # Add top 3 emotions for quick reference
+                top_emotions = sorted(emotions.items(), key=lambda x: x[1], reverse=True)[:3]
+                segment_with_emotions["top_emotions"] = [
+                    {"emotion": emotion, "score": float(score)} 
+                    for emotion, score in top_emotions
+                ]
+                
+                segments_with_emotions.append(segment_with_emotions)
+            
+            # Save emotion analysis
+            with open(emotions_file, "w", encoding="utf-8") as f:
+                json.dump(segments_with_emotions, f, indent=2, ensure_ascii=False)
+            
+            print(f"✅ Emotion analysis completed and saved for {len(segments_with_emotions)} segments")
+            
+            # Print emotion summary
+            primary_emotions = [seg["primary_emotion"] for seg in segments_with_emotions]
+            emotion_counts = {}
+            for emotion in primary_emotions:
+                emotion_counts[emotion] = emotion_counts.get(emotion, 0) + 1
+            
+            print(f"📊 Primary emotion distribution:")
+            for emotion, count in sorted(emotion_counts.items(), key=lambda x: x[1], reverse=True):
+                percentage = (count / len(segments_with_emotions)) * 100
+                print(f"   {emotion}: {count} segments ({percentage:.1f}%)")
+            
+            return segments_with_emotions
+            
+        except Exception as e:
+            print(f"❌ Error analyzing emotions: {e}")
+            print("⚠️ Continuing without emotion analysis...")
+            return segments
+
     def generate_embeddings(self, segments: List[Dict[str, Any]], force_reprocess: bool = False) -> List[Dict[str, Any]]:
         """
         Generate embeddings for semantic segments (local or OpenAI).
@@ -419,14 +559,14 @@ class VideoProcessor:
                     print(f"  Processing batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
                     
                     response = self.openai_client.embeddings.create(
-                        model="text-embedding-3-small",
+                        model="text-embedding-3-large",
                         input=batch_texts
                     )
                     
                     batch_embeddings = [item.embedding for item in response.data]
                     all_embeddings.extend(batch_embeddings)
                 
-                model_name = "text-embedding-3-small"
+                model_name = "text-embedding-3-large"
             
             # Add embeddings to segments
             segments_with_embeddings = []
@@ -460,7 +600,7 @@ class VideoProcessor:
         Store segments and embeddings in Pinecone.
         
         Args:
-            segments_with_embeddings: Segments with their embeddings
+            segments_with_embeddings: Segments with their embeddings and emotion analysis
         """
         print(f"📌 Storing {len(segments_with_embeddings)} segments in Pinecone...")
         
@@ -484,6 +624,20 @@ class VideoProcessor:
                     "full_text_length": int(len(segment["text"]))
                 }
                 
+                # Add emotion metadata if available
+                if "primary_emotion" in segment:
+                    metadata.update({
+                        "primary_emotion": str(segment["primary_emotion"]),
+                        "primary_emotion_score": float(segment["primary_emotion_score"]),
+                        "emotion_analysis_model": str(segment.get("emotion_analysis_model", "unknown"))
+                    })
+                    
+                    # Add top 3 emotions as separate fields for easier filtering
+                    if "top_emotions" in segment:
+                        for i, emotion_data in enumerate(segment["top_emotions"][:3]):
+                            metadata[f"emotion_{i+1}"] = str(emotion_data["emotion"])
+                            metadata[f"emotion_{i+1}_score"] = float(emotion_data["score"])
+                
                 vectors.append({
                     "id": vector_id,
                     "values": [float(x) for x in segment["embedding"]],  # Convert to native Python floats
@@ -498,6 +652,12 @@ class VideoProcessor:
                 print(f"  Uploaded batch {i//batch_size + 1}/{(len(vectors) + batch_size - 1)//batch_size}")
             
             print(f"✅ Stored {len(vectors)} vectors in Pinecone")
+            
+            # Print metadata summary if emotions are included
+            if any("primary_emotion" in seg for seg in segments_with_embeddings):
+                emotions_in_pinecone = [seg["primary_emotion"] for seg in segments_with_embeddings if "primary_emotion" in seg]
+                unique_emotions = set(emotions_in_pinecone)
+                print(f"📊 Stored segments with {len(unique_emotions)} different primary emotions: {sorted(unique_emotions)}")
             
         except Exception as e:
             print(f"❌ Error storing in Pinecone: {e}")
@@ -571,13 +731,16 @@ class VideoProcessor:
                 print("⚠️ No segments created, skipping video")
                 return False
             
-            # Step 3: Generate embeddings
-            segments_with_embeddings = self.generate_embeddings(segments, force_reprocess)
+            # Step 3: Analyze emotions (new step!)
+            segments_with_emotions = self.analyze_emotions(segments, force_reprocess)
             
-            # Step 4: Find similar segments (for analysis)
+            # Step 4: Generate embeddings
+            segments_with_embeddings = self.generate_embeddings(segments_with_emotions, force_reprocess)
+            
+            # Step 5: Find similar segments (for analysis)
             similar_groups = self.find_similar_segments(segments_with_embeddings)
             
-            # Step 5: Store in Pinecone
+            # Step 6: Store in Pinecone
             self.store_in_pinecone(segments_with_embeddings)
             
             # Save similarity analysis
@@ -587,8 +750,18 @@ class VideoProcessor:
                 "total_segments": len(segments),
                 "similar_groups": similar_groups,
                 "average_segment_duration": np.mean([seg["duration"] for seg in segments]),
+                "emotion_analysis_enabled": self.enable_emotion_analysis,
                 "processed_at": datetime.now().isoformat()
             }
+            
+            # Add emotion analysis summary if available
+            if segments_with_emotions and "primary_emotion" in segments_with_emotions[0]:
+                primary_emotions = [seg["primary_emotion"] for seg in segments_with_emotions]
+                emotion_counts = {}
+                for emotion in primary_emotions:
+                    emotion_counts[emotion] = emotion_counts.get(emotion, 0) + 1
+                analysis_data["emotion_distribution"] = emotion_counts
+                analysis_data["most_common_emotion"] = max(emotion_counts.items(), key=lambda x: x[1])[0]
             
             with open(analysis_file, "w", encoding="utf-8") as f:
                 json.dump(analysis_data, f, indent=2)
@@ -613,6 +786,9 @@ class VideoProcessor:
         print(f"🚀 Starting batch processing of videos in {self.downloads_dir}")
         if force_reprocess:
             print("🔄 Force reprocessing enabled - ignoring all cached results")
+        
+        emotion_status = "enabled" if self.enable_emotion_analysis else "disabled"
+        print(f"😊 Emotion analysis: {emotion_status}")
         
         # Find all video files
         video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
@@ -648,6 +824,8 @@ class VideoProcessor:
             "successful": successful,
             "failed": failed,
             "results": results,
+            "emotion_analysis_enabled": self.enable_emotion_analysis,
+            "embedding_type": self.embedding_type,
             "processed_at": datetime.now().isoformat()
         }
         
@@ -659,24 +837,27 @@ class VideoProcessor:
         print(f"✅ Successful: {successful}")
         print(f"❌ Failed: {failed}")
         print(f"📊 Success rate: {successful/len(video_files)*100:.1f}%")
+        print(f"😊 Emotion analysis: {emotion_status}")
         
         return summary
 
 def main():
     """Main function to run the video processing pipeline."""
-    print("🎬 Video Processing Pipeline")
-    print("=" * 50)
+    print("🎬 Video Processing Pipeline with Emotion Analysis")
+    print("=" * 60)
     
     # Configuration options
     embedding_type = os.getenv("EMBEDDING_TYPE", "local").lower()
     local_model = os.getenv("LOCAL_MODEL", "all-MiniLM-L6-v2")
     force_reprocess = os.getenv("FORCE_REPROCESS", "false").lower() in ("true", "1", "yes")
+    enable_emotions = os.getenv("ENABLE_EMOTION_ANALYSIS", "true").lower() in ("true", "1", "yes")
     
     print(f"🔧 Configuration:")
     print(f"   Embedding type: {embedding_type}")
     if embedding_type == "local":
         print(f"   Local model: {local_model}")
     print(f"   Force reprocess: {force_reprocess}")
+    print(f"   Emotion analysis: {'enabled' if enable_emotions else 'disabled'}")
     print()
     
     # Check required environment variables based on embedding type
@@ -697,7 +878,8 @@ def main():
         # Initialize processor with configuration
         processor = VideoProcessor(
             embedding_type=embedding_type,
-            local_model_name=local_model
+            local_model_name=local_model,
+            enable_emotion_analysis=enable_emotions
         )
         
         # Process all videos
@@ -708,11 +890,15 @@ def main():
         print(f"   Successful: {summary['successful']}")
         print(f"   Failed: {summary['failed']}")
         print(f"   Embedding type: {embedding_type}")
+        print(f"   Emotion analysis: {'enabled' if enable_emotions else 'disabled'}")
         
         if summary['successful'] > 0:
             print(f"\n🔍 You can now search your video segments using Pinecone!")
             print(f"   Index name: {processor.index_name}")
             print(f"   Embedding dimensions: {processor.embedding_dimensions}")
+            if enable_emotions:
+                print(f"   ✨ Segments include emotion analysis with 28 emotion categories!")
+                print(f"   📊 Search and filter by emotions: joy, sadness, anger, excitement, etc.")
             print(f"   Search with: python search_segments.py \"your query\"")
         
     except Exception as e:
