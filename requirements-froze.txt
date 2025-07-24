@@ -17,4 +17,3 @@ plotly==6.2.0
 networkx==3.5
 SQLAlchemy==2.0.41
 psycopg2-binary==2.9.10
-isodate==0.6.1

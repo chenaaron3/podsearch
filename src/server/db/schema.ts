@@ -1,7 +1,7 @@
-import { relations, sql } from "drizzle-orm";
-import { index, pgTableCreator, primaryKey } from "drizzle-orm/pg-core";
-import { type AdapterAccount } from "next-auth/adapters";
+import { relations, sql } from 'drizzle-orm';
+import { index, pgTableCreator, primaryKey } from 'drizzle-orm/pg-core';
 
+import type { AdapterAccount } from "next-auth/adapters";
 /**
  * This is an example of how to use the multi-project schema feature of Drizzle ORM. Use the same
  * database instance for multiple projects.
@@ -9,6 +9,8 @@ import { type AdapterAccount } from "next-auth/adapters";
  * @see https://orm.drizzle.team/docs/goodies#multi-project-schema
  */
 export const createTable = pgTableCreator((name) => `podsearch_${name}`);
+
+// Video processing statuses: pending, downloaded, processed, embedded, finished, failed
 
 export const posts = createTable(
   "post",
@@ -106,3 +108,73 @@ export const verificationTokens = createTable(
   }),
   (t) => [primaryKey({ columns: [t.identifier, t.token] })],
 );
+
+// Video processing pipeline tables
+export const playlists = createTable(
+  "playlist",
+  (d) => ({
+    id: d.integer().primaryKey().generatedByDefaultAsIdentity(),
+    youtubeId: d.varchar({ length: 255 }).notNull().unique(),
+    title: d.varchar({ length: 500 }).notNull(),
+    description: d.text(),
+    channelName: d.varchar({ length: 255 }),
+    channelId: d.varchar({ length: 255 }),
+    url: d.varchar({ length: 500 }).notNull(),
+    totalVideos: d.integer().default(0),
+    createdAt: d
+      .timestamp({ withTimezone: true })
+      .default(sql`CURRENT_TIMESTAMP`)
+      .notNull(),
+    updatedAt: d.timestamp({ withTimezone: true }).$onUpdate(() => new Date()),
+    lastSyncAt: d.timestamp({ withTimezone: true }),
+  }),
+  (t) => [
+    index("playlist_youtube_id_idx").on(t.youtubeId),
+    index("playlist_channel_id_idx").on(t.channelId),
+  ],
+);
+
+export const videos = createTable(
+  "video",
+  (d) => ({
+    id: d.integer().primaryKey().generatedByDefaultAsIdentity(),
+    youtubeId: d.varchar({ length: 255 }).notNull().unique(),
+    playlistId: d
+      .integer()
+      .references(() => playlists.id, { onDelete: "cascade" }),
+    title: d.varchar({ length: 500 }).notNull(),
+    description: d.text(),
+    duration: d.integer(), // duration in seconds
+    publishedAt: d.timestamp({ withTimezone: true }),
+    thumbnailUrl: d.varchar({ length: 500 }),
+    url: d.varchar({ length: 500 }).notNull(),
+    localFilePath: d.varchar({ length: 1000 }),
+    status: d.varchar({ length: 20 }).default("pending").notNull(),
+    processingStartedAt: d.timestamp({ withTimezone: true }),
+    processingCompletedAt: d.timestamp({ withTimezone: true }),
+    errorMessage: d.text(),
+    retryCount: d.integer().default(0),
+    createdAt: d
+      .timestamp({ withTimezone: true })
+      .default(sql`CURRENT_TIMESTAMP`)
+      .notNull(),
+    updatedAt: d.timestamp({ withTimezone: true }).$onUpdate(() => new Date()),
+  }),
+  (t) => [
+    index("video_youtube_id_idx").on(t.youtubeId),
+    index("video_playlist_id_idx").on(t.playlistId),
+    index("video_status_idx").on(t.status),
+    index("video_published_at_idx").on(t.publishedAt),
+  ],
+);
+
+export const playlistsRelations = relations(playlists, ({ many }) => ({
+  videos: many(videos),
+}));
+
+export const videosRelations = relations(videos, ({ one }) => ({
+  playlist: one(playlists, {
+    fields: [videos.playlistId],
+    references: [playlists.id],
+  }),
+}));

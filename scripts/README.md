@@ -9,3 +9,7 @@ python3 scripts/process_video.py
 # Search the video
 
 python3 scripts/search_segments.py
+
+# Update pip requirements
+
+pip freeze -q -r ./scripts/requirements.txt | sed '/freeze/,$ d' > requirements-froze.txt

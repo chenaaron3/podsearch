@@ -43,7 +43,7 @@ class VideoProcessor:
                  downloads_dir: str = "./downloads",
                  output_dir: str = "./processed",
                  pinecone_index_name: str = "video-segments",
-                 embedding_type: str = "local",
+                 embedding_type: str = "openai",
                  local_model_name: str = "all-MiniLM-L6-v2",
                  enable_emotion_analysis: bool = True):
         """
@@ -118,10 +118,10 @@ class VideoProcessor:
         self.index = None
         
         # Segment parameters
-        self.target_segment_duration = 90  # 1.5 minutes in seconds
-        self.min_segment_duration = 60    # 1 minute minimum
-        self.max_segment_duration = 120   # 2 minutes maximum
-        self.similarity_threshold = 0.85  # Threshold for grouping similar segments
+        self.target_segment_duration = 45   # 45 seconds target
+        self.min_segment_duration = 30     # 30 seconds minimum  
+        self.max_segment_duration = 60     # 60 seconds maximum
+        self.similarity_threshold = 0.85   # Threshold for grouping similar segments
         
         self._setup_pinecone_index()
 
@@ -314,6 +314,10 @@ class VideoProcessor:
         }
         
         for i, segment in enumerate(segments[1:], 1):
+            # Skip empty segments
+            if not segment.get("text", "").strip():
+                continue
+                
             current_duration = current_segment["end_time"] - current_segment["start_time"]
             
             # Check if we should start a new semantic segment
@@ -329,7 +333,7 @@ class VideoProcessor:
                 if time_gap > 2.0:  # 2+ second pause suggests topic change
                     should_split = True
                 elif (current_segment["text"].endswith(('.', '!', '?')) and 
-                      segment["text"].strip()[0].isupper()):
+                      segment["text"].strip() and segment["text"].strip()[0].isupper()):
                     # Sentence boundary with capital letter (new topic)
                     should_split = True
             
@@ -663,48 +667,6 @@ class VideoProcessor:
             print(f"❌ Error storing in Pinecone: {e}")
             raise
 
-    def find_similar_segments(self, segments_with_embeddings: List[Dict[str, Any]]) -> List[List[int]]:
-        """
-        Find groups of similar segments based on embedding similarity.
-        
-        Args:
-            segments_with_embeddings: Segments with their embeddings
-            
-        Returns:
-            List of lists, where each inner list contains indices of similar segments
-        """
-        print(f"🔍 Finding similar segments...")
-        
-        if len(segments_with_embeddings) < 2:
-            return [[0]] if segments_with_embeddings else []
-        
-        # Extract embeddings
-        embeddings = np.array([seg["embedding"] for seg in segments_with_embeddings])
-        
-        # Calculate similarity matrix
-        similarity_matrix = cosine_similarity(embeddings)
-        
-        # Find similar segments
-        similar_groups = []
-        processed = set()
-        
-        for i in range(len(segments_with_embeddings)):
-            if i in processed:
-                continue
-            
-            # Find segments similar to current one
-            similar_indices = []
-            for j in range(len(segments_with_embeddings)):
-                if similarity_matrix[i][j] >= self.similarity_threshold:
-                    similar_indices.append(j)
-                    processed.add(j)
-            
-            if similar_indices:
-                similar_groups.append(similar_indices)
-        
-        print(f"✅ Found {len(similar_groups)} groups of similar segments")
-        return similar_groups
-
     def process_single_video(self, video_path: Path, force_reprocess: bool = False) -> bool:
         """
         Process a single video through the complete pipeline.
@@ -737,9 +699,6 @@ class VideoProcessor:
             # Step 4: Generate embeddings
             segments_with_embeddings = self.generate_embeddings(segments_with_emotions, force_reprocess)
             
-            # Step 5: Find similar segments (for analysis)
-            similar_groups = self.find_similar_segments(segments_with_embeddings)
-            
             # Step 6: Store in Pinecone
             self.store_in_pinecone(segments_with_embeddings)
             
@@ -748,7 +707,6 @@ class VideoProcessor:
             analysis_data = {
                 "video_name": video_path.name,
                 "total_segments": len(segments),
-                "similar_groups": similar_groups,
                 "average_segment_duration": np.mean([seg["duration"] for seg in segments]),
                 "emotion_analysis_enabled": self.enable_emotion_analysis,
                 "processed_at": datetime.now().isoformat()
