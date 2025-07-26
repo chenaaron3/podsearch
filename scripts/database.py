@@ -38,7 +38,6 @@ class SemanticSegment(TypedDict):
     end_time: float
     duration: float
     text: str
-    source_segments: List[int]
     timestamp_readable: str
 
 class EmotionScore(TypedDict):

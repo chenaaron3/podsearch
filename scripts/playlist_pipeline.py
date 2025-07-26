@@ -11,7 +11,6 @@ Orchestrates the entire workflow:
 
 Usage:
     python playlist_pipeline.py <playlist_or_channel_url>
-    python playlist_pipeline.py <playlist_or_channel_url> --resume
 """
 
 import sys
@@ -56,41 +55,6 @@ class PlaylistPipeline:
         print(f"\n🎵 Step 1: Syncing playlist/channel...")
         return self.playlist_fetcher.sync_playlist(url)
     
-    def process_pending_videos(self, playlist_id: int, max_videos: Optional[int] = None):
-        """Process all pending videos through the complete pipeline."""
-        pending_videos = self.db_manager.get_pending_videos(playlist_id)
-        
-        if not pending_videos:
-            print("ℹ️ No pending videos to process")
-            return
-        
-        # Limit number of videos if specified
-        if max_videos and len(pending_videos) > max_videos:
-            pending_videos = pending_videos[:max_videos]
-            print(f"📝 Processing first {max_videos} videos (out of {len(self.db_manager.get_pending_videos(playlist_id))} total)")
-        
-        print(f"\n🚀 Step 2: Processing {len(pending_videos)} videos...")
-        
-        for i, video in enumerate(pending_videos, 1):
-            duration_min = video.duration // 60 if video.duration else 0
-            print(f"\n📹 Processing video {i}/{len(pending_videos)}: {video.title[:60]}... ({duration_min}min)")
-            
-            try:
-                success = self.process_single_video(video)
-                if success:
-                    print(f"✅ Video {i} completed successfully")
-                else:
-                    print(f"❌ Video {i} failed - marked as failed")
-            
-            except KeyboardInterrupt:
-                print(f"\n⏹️ Pipeline interrupted by user")
-                print(f"📊 Progress: {i-1}/{len(pending_videos)} videos completed")
-                break
-            except Exception as e:
-                print(f"❌ Unexpected error processing video {i}: {e}")
-                self.db_manager.update_video_status(video.id, VideoStatus.FAILED, str(e))
-                continue
-    
     def process_single_video(self, video: Video) -> bool:
         """
         Process a single video through all stages.
@@ -123,7 +87,7 @@ class PlaylistPipeline:
             print(f"  📥 Downloading...")
             
             # Check if already downloaded
-            if video.status == VideoStatus.DOWNLOADED and video.local_file_path:
+            if video.local_file_path:
                 local_path = Path(video.local_file_path)
                 if local_path.exists():
                     print(f"  ✅ Already downloaded: {local_path.name}")
@@ -164,7 +128,6 @@ class PlaylistPipeline:
             )
             
             if success:
-                self.db_manager.update_video_status(video.id, VideoStatus.EMBEDDED) 
                 print(f"  ✅ Processing complete")
                 return True
             else:
@@ -207,30 +170,25 @@ class PlaylistPipeline:
         print(f"  {'Total':>10}: {total:>3}")
         print("=" * 50)
     
-    def resume_processing(self, playlist_id: int):
+    def process_by_status(self, playlist_id: int):
         """Resume processing from where it left off."""
         print(f"\n🔄 Resuming processing...")
         
         # Process videos in each stage
         stages_to_check = [
-            VideoStatus.PENDING,
-            VideoStatus.DOWNLOADED,
             VideoStatus.EMBEDDED,
-            VideoStatus.FAILED
+            VideoStatus.FAILED,
+            VideoStatus.DOWNLOADED,
+            VideoStatus.PENDING,
         ]
         
         for status in stages_to_check:
             videos = self.db_manager.get_videos_by_status(status, playlist_id)
             if videos:
                 print(f"\n📹 Found {len(videos)} videos in '{status}' status")
-                if status == VideoStatus.PENDING:
-                    self.process_pending_videos(playlist_id)
-                    break  # This will handle the full pipeline for pending videos
-                else:
-                    # For other statuses, we need to continue from their current stage
-                    for video in videos:
-                        print(f"  Resuming: {video.title[:50]}...")
-                        self._process_video(video)
+                for video in videos:
+                    print(f"  Resuming: {video.title[:50]}...")
+                    self.process_single_video(video)
         
         print("\n✅ Resume complete")
 
@@ -241,14 +199,10 @@ def main():
         epilog="""
 Examples:
   python playlist_pipeline.py "https://www.youtube.com/playlist?list=PLExample"
-  python playlist_pipeline.py "https://www.youtube.com/@TheDiaryOfACEO" --max-videos 5
-  python playlist_pipeline.py "https://www.youtube.com/c/channelname" --resume
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("url", help="YouTube playlist or channel URL")
-    parser.add_argument("--resume", action="store_true", help="Resume processing existing playlist")
-    parser.add_argument("--max-videos", type=int, help="Maximum number of videos to process")
     parser.add_argument("--downloads-dir", default="./downloads", help="Downloads directory")
     parser.add_argument("--processed-dir", default="./processed", help="Processed output directory")
     
@@ -273,12 +227,8 @@ Examples:
         # Show current status
         pipeline.show_playlist_status(playlist.id)
         
-        if args.resume:
-            # Resume processing
-            pipeline.resume_processing(playlist.id)
-        else:
-            # Process new/pending videos
-            pipeline.process_pending_videos(playlist.id, args.max_videos)
+        # Process all unfinished videos
+        pipeline.process_by_status(playlist.id)
         
         # Show final status
         print(f"\n🏁 Pipeline Complete!")

@@ -47,7 +47,8 @@ from database import (
     SegmentWithEmbedding,
     PineconeMetadata,
     PineconeVector,
-    Video
+    Video,
+    VideoStatus
 )
 
 # Load environment variables
@@ -235,7 +236,8 @@ class VideoProcessor:
                 # Validate the transcript has required fields
                 if all(key in transcript_data for key in ["segments"]):
                     print(f"✅ Transcript loaded: {len(transcript_data['segments'])} segments")
-                    self.db_manager.save_transcript_data(video.id, transcript_data)
+                    if not video.transcript_id:
+                        self.db_manager.save_transcript_data(video.id, transcript_data)
                     return transcript_data
                 else:
                     print("⚠️ Existing transcript incomplete, reprocessing...")
@@ -328,7 +330,6 @@ class VideoProcessor:
             "start_time": segments[0]["start"],
             "end_time": segments[0]["end"],
             "text": segments[0]["text"],
-            "source_segments": [segments[0]["id"]]
         }
         
         for i, segment in enumerate(segments[1:], 1):
@@ -364,13 +365,11 @@ class VideoProcessor:
                     "start_time": segment["start"],
                     "end_time": segment["end"],
                     "text": segment["text"],
-                    "source_segments": [segment["id"]]
                 }
             else:
                 # Extend current segment
                 current_segment["end_time"] = segment["end"]
                 current_segment["text"] += " " + segment["text"]
-                current_segment["source_segments"].append(segment["id"])
         
         # Add the last segment
         if current_segment["text"]:
@@ -387,7 +386,6 @@ class VideoProcessor:
                 "end_time": seg["end_time"],
                 "duration": seg["end_time"] - seg["start_time"],
                 "text": seg["text"].strip(),
-                "source_segments": seg["source_segments"],
                 "timestamp_readable": f"{int(seg['start_time']//60):02d}:{int(seg['start_time']%60):02d} - {int(seg['end_time']//60):02d}:{int(seg['end_time']%60):02d}"
             }
             processed_segments.append(processed_segment)
@@ -603,7 +601,7 @@ class VideoProcessor:
             print(f"❌ Error generating embeddings: {e}")
             raise
 
-    def store_in_pinecone(self, segments_with_embeddings: List[SegmentWithEmbedding]):
+    def store_in_pinecone(self, video: Video, segments_with_embeddings: List[SegmentWithEmbedding]):
         """
         Store segments and embeddings in Pinecone.
         
@@ -613,6 +611,11 @@ class VideoProcessor:
         print(f"📌 Storing {len(segments_with_embeddings)} segments in Pinecone...")
         
         try:
+            # Mark video as embedding
+            if video.status in [VideoStatus.EMBEDDED, VideoStatus.FINISHED]:
+                print(f"🔄 Video already embedded, skipping...")
+                return
+
             # Prepare vectors for upsert
             vectors: List[PineconeVector] = []
             for segment in segments_with_embeddings:
@@ -624,12 +627,12 @@ class VideoProcessor:
                     "video_id": segment["video_id"],
                     "video_name": segment["video_name"],
                     "segment_id": segment["segment_id"],
-                    "start_time": segment["start_time"],
-                    "end_time": segment["end_time"],
-                    "duration": segment["duration"],
+                    "start_time": float(segment["start_time"]),
+                    "end_time": float(segment["end_time"]),
+                    "duration": float(segment["duration"]),
                     "timestamp_readable": segment["timestamp_readable"],
-                    "primary_emotion": segment.get("primary_emotion"),
-                    "primary_emotion_score": segment.get("primary_emotion_score"),
+                    "primary_emotion": segment["primary_emotion"],
+                    "primary_emotion_score": float(segment["primary_emotion_score"]),
                 }
                     
                 vector: PineconeVector = {
@@ -653,6 +656,8 @@ class VideoProcessor:
             unique_emotions = set(emotions_in_pinecone)
             print(f"📊 Stored segments with {len(unique_emotions)} different primary emotions: {sorted(unique_emotions)}")
             
+            # Mark video as done after embeddings are stored
+            self.db_manager.update_video_status(video.id, VideoStatus.EMBEDDED) 
         except Exception as e:
             print(f"❌ Error storing in Pinecone: {e}")
             raise
@@ -695,7 +700,7 @@ class VideoProcessor:
             segments_with_embeddings = self.generate_embeddings(video, segments_with_emotions, force_reprocess)
             
             # Step 6: Store in Pinecone
-            self.store_in_pinecone(segments_with_embeddings)
+            self.store_in_pinecone(video, segments_with_embeddings)
             
             # Save similarity analysis
             analysis_file = self.output_dir / f"{video.title}_analysis.json"
