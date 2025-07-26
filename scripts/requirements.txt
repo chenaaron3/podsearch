@@ -9,6 +9,7 @@ ffmpeg-python==0.2.0
 sentence-transformers==5.0.0
 torch==2.7.1
 transformers==4.53.3
+pyannote.audio==3.3.2
 bertopic==0.17.3
 ruptures==1.1.9
 umap-learn==0.5.9.post2

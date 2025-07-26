@@ -155,13 +155,21 @@ class PlaylistPipeline:
         """Process video (transcript + embeddings) and update status.""" 
         try:
             print(f"  🔄 Processing (transcript + embeddings)...")
-            # Get the local file path
-            if not video.local_file_path or not Path(video.local_file_path).exists():
+            
+            # Fetch fresh video data from database to get updated local_file_path
+            with self.db_manager.get_session() as session:
+                fresh_video = session.query(Video).filter(Video.id == video.id).first()
+                if not fresh_video:
+                    raise ValueError("Video not found in database")
+                local_file_path = fresh_video.local_file_path
+            
+            # Check if local file exists
+            if not local_file_path or not Path(local_file_path).exists():
                 raise ValueError("Video file not found for processing")
             
             # Process video using existing VideoProcessor
             success = self.processor.process_single_video(
-                Path(video.local_file_path),
+                Path(local_file_path),
                 force_reprocess=False
             )
             
@@ -217,7 +225,8 @@ class PlaylistPipeline:
         stages_to_check = [
             VideoStatus.PENDING,
             VideoStatus.DOWNLOADED,
-            VideoStatus.EMBEDDED
+            VideoStatus.EMBEDDED,
+            VideoStatus.FAILED
         ]
         
         for status in stages_to_check:
@@ -231,8 +240,7 @@ class PlaylistPipeline:
                     # For other statuses, we need to continue from their current stage
                     for video in videos:
                         print(f"  Resuming: {video.title[:50]}...")
-                        if status in [VideoStatus.DOWNLOADED, VideoStatus.EMBEDDED]:
-                            self._process_video(video)
+                        self._process_video(video)
         
         print("\n✅ Resume complete")
 

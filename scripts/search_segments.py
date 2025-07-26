@@ -299,17 +299,14 @@ class SegmentSearcher:
 def main():
     """Main function for interactive search."""
     if len(sys.argv) < 2:
-        print("Usage: python search_segments.py '<search_query>' [--full-text]")
-        print("\nOptions:")
-        print("  --full-text    Fetch and display complete segment text from transcript files")
+        print("Usage: python search_segments.py '<search_query>'")
         print("\nExamples:")
         print('python search_segments.py "What advice do they give about money?"')
-        print('python search_segments.py "business tips" --full-text')
         return
     
     # Parse command line arguments
     args = sys.argv[1:]
-    show_full_text = "--full-text" in args
+    show_full_text =True
     
     # Remove flags from query
     query_parts = [arg for arg in args if not arg.startswith("--")]
