@@ -28,8 +28,8 @@ DATABASE_URL="postgresql://username:password@localhost:5432/database_name"
 
 # Authentication (Discord OAuth)
 AUTH_SECRET="your-nextauth-secret-here"
-AUTH_DISCORD_ID="your-discord-client-id"
-AUTH_DISCORD_SECRET="your-discord-client-secret"
+AUTH_GOOGLE_ID="your-discord-client-id"
+AUTH_GOOGLE_SECRET="your-discord-client-secret"
 
 # AI APIs
 OPENAI_API_KEY="your-openai-api-key"
