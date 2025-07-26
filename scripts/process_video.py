@@ -11,19 +11,21 @@ Features:
 - GoEmotions-based emotion detection for each segment
 - OpenAI embeddings for similarity analysis
 - Pinecone vector storage
+- Database integration for video metadata
 - Batch processing of downloaded videos
 
 Usage:
-    python process_video.py
+    python process_video.py --video-id <video_id>
+    python process_video.py --playlist-id <playlist_id>
 """
 
 import os
 import json
 import re
+import argparse
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
-import hashlib
 
 import whisper
 import numpy as np
@@ -34,6 +36,19 @@ import ffmpeg
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 from transformers import pipeline
+
+# Import database manager
+from database import (
+    DatabaseManager, 
+    TranscriptData, 
+    TranscriptSegment, 
+    SemanticSegment,
+    SegmentWithEmotion,
+    SegmentWithEmbedding,
+    PineconeMetadata,
+    PineconeVector,
+    Video
+)
 
 # Load environment variables
 load_dotenv()
@@ -66,6 +81,9 @@ class VideoProcessor:
         (self.output_dir / "segments").mkdir(exist_ok=True)
         (self.output_dir / "embeddings").mkdir(exist_ok=True)
         (self.output_dir / "emotions").mkdir(exist_ok=True)
+        
+        # Initialize database manager
+        self.db_manager = DatabaseManager()
         
         # Initialize models and clients
         print("🔄 Loading Whisper model...")
@@ -125,6 +143,8 @@ class VideoProcessor:
         
         self._setup_pinecone_index()
 
+
+
     def _setup_pinecone_index(self):
         """Set up Pinecone index for storing embeddings."""
         try:
@@ -159,17 +179,7 @@ class VideoProcessor:
             print(f"❌ Error setting up Pinecone index: {e}")
             raise
 
-    def extract_video_url_from_filename(self, filename: str) -> Optional[str]:
-        """
-        Extract video URL from filename if it contains YouTube video ID pattern.
-        This is a fallback - ideally you'd store the URL during download.
-        """
-        # For now, return a placeholder. In production, you'd want to store
-        # the original URL during the download process.
-        video_id = re.search(r'[a-zA-Z0-9_-]{11}', filename)
-        if video_id:
-            return f"https://www.youtube.com/watch?v={video_id.group()}"
-        return f"unknown_video_{hashlib.md5(filename.encode()).hexdigest()[:8]}"
+
 
     @staticmethod
     def sanitize_vector_id(text: str) -> str:
@@ -192,29 +202,40 @@ class VideoProcessor:
         
         return sanitized[:100]  # Limit length for Pinecone
 
-    def extract_transcript(self, video_path: Path, force_reprocess: bool = False) -> Dict[str, Any]:
+    def extract_transcript(self, video: Video, force_reprocess: bool = False) -> Optional[TranscriptData]:
         """
-        Extract transcript using Whisper with timestamps, or load existing if available.
+        Extract transcript using Whisper with timestamps, using database video metadata.
         
         Args:
-            video_path: Path to the video file
+            video_id: Database ID of the video
             force_reprocess: If True, reprocess even if transcript exists
             
         Returns:
-            Dictionary containing transcript data with timestamps
+            Dictionary containing transcript data with timestamps or None if failed
         """
-        transcript_file = self.output_dir / "transcripts" / f"{video_path.stem}_transcript.json"
+        # Get video from database using DAO
+        if not video.local_file_path:
+            print(f"❌ No local file path for video {video.id}")
+            return None
+            
+        video_path = Path(video.local_file_path)
+        if not video_path.exists():
+            print(f"❌ Video file not found: {video_path}")
+            return None
+        
+        transcript_file = self.output_dir / "transcripts" / f"{video.id}_transcript.json"
         
         # Check if transcript already exists
         if transcript_file.exists() and not force_reprocess:
-            print(f"📄 Loading existing transcript: {video_path.name}")
+            print(f"📄 Loading existing transcript: {video.title}")
             try:
                 with open(transcript_file, "r", encoding="utf-8") as f:
                     transcript_data = json.load(f)
                 
                 # Validate the transcript has required fields
-                if all(key in transcript_data for key in ["video_path", "segments", "full_text"]):
+                if all(key in transcript_data for key in ["segments"]):
                     print(f"✅ Transcript loaded: {len(transcript_data['segments'])} segments")
+                    self.db_manager.save_transcript_data(video.id, transcript_data)
                     return transcript_data
                 else:
                     print("⚠️ Existing transcript incomplete, reprocessing...")
@@ -223,7 +244,7 @@ class VideoProcessor:
                 print(f"⚠️ Error loading existing transcript: {e}, reprocessing...")
         
         # Process with Whisper if no valid transcript exists
-        print(f"🎤 Extracting transcript with Whisper: {video_path.name}")
+        print(f"🎤 Extracting transcript with Whisper: {video.title}")
         
         try:
             # Extract audio and transcribe
@@ -234,15 +255,10 @@ class VideoProcessor:
                 verbose=False
             )
             
-            # Structure the transcript data
+            # Structure the transcript data using database metadata
             transcript_data = {
-                "video_path": str(video_path),
-                "video_name": video_path.name,
-                "video_url": self.extract_video_url_from_filename(video_path.name),
-                "duration": result.get("duration", 0),
                 "language": result.get("language", "en"),
                 "segments": [],
-                "full_text": result["text"],
                 "processed_at": datetime.now().isoformat()
             }
             
@@ -257,18 +273,21 @@ class VideoProcessor:
                 }
                 transcript_data["segments"].append(segment_data)
             
-            # Save transcript
+            # Save transcript to file
             with open(transcript_file, "w", encoding="utf-8") as f:
                 json.dump(transcript_data, f, indent=2, ensure_ascii=False)
+            
+            # Save transcript to database using DAO
+            self.db_manager.save_transcript_data(video.id, transcript_data)
             
             print(f"✅ Transcript extracted and saved: {len(transcript_data['segments'])} segments")
             return transcript_data
             
         except Exception as e:
             print(f"❌ Error extracting transcript: {e}")
-            raise
+            return None
 
-    def create_semantic_segments(self, transcript_data: Dict[str, Any], force_reprocess: bool = False) -> List[Dict[str, Any]]:
+    def create_semantic_segments(self, video: Video, transcript_data: TranscriptData, force_reprocess: bool = False) -> List[SemanticSegment]:
         """
         Create semantic segments based on topic changes and target duration.
         
@@ -279,12 +298,11 @@ class VideoProcessor:
         Returns:
             List of semantic segments
         """
-        video_path = Path(transcript_data["video_path"])
-        segments_file = self.output_dir / "segments" / f"{video_path.stem}_segments.json"
+        segments_file = self.output_dir / "segments" / f"{video.id}_segments.json"
         
         # Check if segments already exist
         if segments_file.exists() and not force_reprocess:
-            print(f"📄 Loading existing segments: {video_path.name}")
+            print(f"📄 Loading existing segments: {video.title}")
             try:
                 with open(segments_file, "r", encoding="utf-8") as f:
                     existing_segments = json.load(f)
@@ -363,9 +381,8 @@ class VideoProcessor:
         for i, seg in enumerate(semantic_segments):
             processed_segment = {
                 "segment_id": i + 1,
-                "video_path": transcript_data["video_path"],
-                "video_name": transcript_data["video_name"],
-                "video_url": transcript_data["video_url"],
+                "video_id": video.id,
+                "video_name": video.title,
                 "start_time": seg["start_time"],
                 "end_time": seg["end_time"],
                 "duration": seg["end_time"] - seg["start_time"],
@@ -382,7 +399,7 @@ class VideoProcessor:
         print(f"✅ Created and saved {len(processed_segments)} semantic segments")
         return processed_segments
 
-    def analyze_emotions(self, segments: List[Dict[str, Any]], force_reprocess: bool = False) -> List[Dict[str, Any]]:
+    def analyze_emotions(self, video: Video, segments: List[SemanticSegment], force_reprocess: bool = False) -> List[SegmentWithEmotion]:
         """
         Analyze emotions for semantic segments using GoEmotions.
         
@@ -397,12 +414,11 @@ class VideoProcessor:
             print("ℹ️ Emotion analysis skipped (disabled or no segments)")
             return segments
             
-        video_path = Path(segments[0]['video_path'])
-        emotions_file = self.output_dir / "emotions" / f"{video_path.stem}_emotions.json"
+        emotions_file = self.output_dir / "emotions" / f"{video.id}_emotions.json"
         
         # Check if emotions already exist
         if emotions_file.exists() and not force_reprocess:
-            print(f"📄 Loading existing emotion analysis: {video_path.name}")
+            print(f"📄 Loading existing emotion analysis: {video.title}")
             try:
                 with open(emotions_file, "r", encoding="utf-8") as f:
                     existing_emotions = json.load(f)
@@ -410,7 +426,7 @@ class VideoProcessor:
                 # Validate emotions have required fields and match current segments
                 if (existing_emotions and 
                     len(existing_emotions) == len(segments) and
-                    all(key in existing_emotions[0] for key in ["emotions", "primary_emotion", "emotion_scores"])):
+                    all(key in existing_emotions[0] for key in ["primary_emotion", "primary_emotion_score"])):
                     print(f"✅ Emotion analysis loaded: {len(existing_emotions)} segments")
                     return existing_emotions
                 else:
@@ -456,20 +472,9 @@ class VideoProcessor:
                 primary_emotion = max(emotions.items(), key=lambda x: x[1])
                 
                 # Add emotion data to segment
-                segment_with_emotions["emotions"] = emotions
                 segment_with_emotions["primary_emotion"] = primary_emotion[0]
                 segment_with_emotions["primary_emotion_score"] = float(primary_emotion[1])
-                segment_with_emotions["emotion_scores"] = emotion_scores
-                segment_with_emotions["emotion_analysis_model"] = "SamLowe/roberta-base-go_emotions"
-                segment_with_emotions["emotion_analysis_timestamp"] = datetime.now().isoformat()
-                
-                # Add top 3 emotions for quick reference
-                top_emotions = sorted(emotions.items(), key=lambda x: x[1], reverse=True)[:3]
-                segment_with_emotions["top_emotions"] = [
-                    {"emotion": emotion, "score": float(score)} 
-                    for emotion, score in top_emotions
-                ]
-                
+
                 segments_with_emotions.append(segment_with_emotions)
             
             # Save emotion analysis
@@ -496,7 +501,7 @@ class VideoProcessor:
             print("⚠️ Continuing without emotion analysis...")
             return segments
 
-    def generate_embeddings(self, segments: List[Dict[str, Any]], force_reprocess: bool = False) -> List[Dict[str, Any]]:
+    def generate_embeddings(self, video: Video, segments: List[SegmentWithEmotion], force_reprocess: bool = False) -> List[SegmentWithEmbedding]:
         """
         Generate embeddings for semantic segments (local or OpenAI).
         
@@ -510,12 +515,11 @@ class VideoProcessor:
         if not segments:
             return []
             
-        video_path = Path(segments[0]['video_path'])
-        embeddings_file = self.output_dir / "embeddings" / f"{video_path.stem}_embeddings.json"
+        embeddings_file = self.output_dir / "embeddings" / f"{video.id}_embeddings.json"
         
         # Check if embeddings already exist
         if embeddings_file.exists() and not force_reprocess:
-            print(f"📄 Loading existing embeddings: {video_path.name}")
+            print(f"📄 Loading existing embeddings: {video.title}")
             try:
                 with open(embeddings_file, "r", encoding="utf-8") as f:
                     existing_embeddings = json.load(f)
@@ -599,7 +603,7 @@ class VideoProcessor:
             print(f"❌ Error generating embeddings: {e}")
             raise
 
-    def store_in_pinecone(self, segments_with_embeddings: List[Dict[str, Any]]):
+    def store_in_pinecone(self, segments_with_embeddings: List[SegmentWithEmbedding]):
         """
         Store segments and embeddings in Pinecone.
         
@@ -610,43 +614,30 @@ class VideoProcessor:
         
         try:
             # Prepare vectors for upsert
-            vectors = []
+            vectors: List[PineconeVector] = []
             for segment in segments_with_embeddings:
-                # Sanitize vector ID to be ASCII-only for Pinecone
-                video_stem = Path(segment['video_path']).stem
-                sanitized_stem = self.sanitize_vector_id(video_stem)
-                vector_id = f"{sanitized_stem}_{segment['segment_id']}"
+                # Create vector ID using video_id for consistency
+                video_id = segment['video_id']
+                vector_id = f"video_{video_id}_segment_{segment['segment_id']}"
                 
-                metadata = {
-                    "video_name": str(segment["video_name"]),
-                    "video_url": str(segment["video_url"]),
-                    "segment_id": int(segment["segment_id"]),
-                    "start_time": float(segment["start_time"]),
-                    "end_time": float(segment["end_time"]),
-                    "duration": float(segment["duration"]),
-                    "timestamp_readable": str(segment["timestamp_readable"]),
-                    "full_text_length": int(len(segment["text"]))
+                metadata: PineconeMetadata = {
+                    "video_id": segment["video_id"],
+                    "video_name": segment["video_name"],
+                    "segment_id": segment["segment_id"],
+                    "start_time": segment["start_time"],
+                    "end_time": segment["end_time"],
+                    "duration": segment["duration"],
+                    "timestamp_readable": segment["timestamp_readable"],
+                    "primary_emotion": segment.get("primary_emotion"),
+                    "primary_emotion_score": segment.get("primary_emotion_score"),
                 }
-                
-                # Add emotion metadata if available
-                if "primary_emotion" in segment:
-                    metadata.update({
-                        "primary_emotion": str(segment["primary_emotion"]),
-                        "primary_emotion_score": float(segment["primary_emotion_score"]),
-                        "emotion_analysis_model": str(segment.get("emotion_analysis_model", "unknown"))
-                    })
                     
-                    # Add top 3 emotions as separate fields for easier filtering
-                    if "top_emotions" in segment:
-                        for i, emotion_data in enumerate(segment["top_emotions"][:3]):
-                            metadata[f"emotion_{i+1}"] = str(emotion_data["emotion"])
-                            metadata[f"emotion_{i+1}_score"] = float(emotion_data["score"])
-                
-                vectors.append({
+                vector: PineconeVector = {
                     "id": vector_id,
                     "values": [float(x) for x in segment["embedding"]],  # Convert to native Python floats
                     "metadata": metadata
-                })
+                }
+                vectors.append(vector)
             
             # Upsert in batches
             batch_size = 100
@@ -658,54 +649,58 @@ class VideoProcessor:
             print(f"✅ Stored {len(vectors)} vectors in Pinecone")
             
             # Print metadata summary if emotions are included
-            if any("primary_emotion" in seg for seg in segments_with_embeddings):
-                emotions_in_pinecone = [seg["primary_emotion"] for seg in segments_with_embeddings if "primary_emotion" in seg]
-                unique_emotions = set(emotions_in_pinecone)
-                print(f"📊 Stored segments with {len(unique_emotions)} different primary emotions: {sorted(unique_emotions)}")
+            emotions_in_pinecone = [seg["primary_emotion"] for seg in segments_with_embeddings if "primary_emotion" in seg]
+            unique_emotions = set(emotions_in_pinecone)
+            print(f"📊 Stored segments with {len(unique_emotions)} different primary emotions: {sorted(unique_emotions)}")
             
         except Exception as e:
             print(f"❌ Error storing in Pinecone: {e}")
             raise
 
-    def process_single_video(self, video_path: Path, force_reprocess: bool = False) -> bool:
+    def process_single_video(self, video_id: int, force_reprocess: bool = False) -> bool:
         """
         Process a single video through the complete pipeline.
         
         Args:
-            video_path: Path to the video file
+            video_id: Database ID of the video to process
             force_reprocess: If True, reprocess all steps even if cached results exist
             
         Returns:
             True if successful, False otherwise
         """
-        print(f"\n🎬 Processing video: {video_path.name}")
+        print(f"\n🎬 Processing video: {video_id}")
         if force_reprocess:
             print("🔄 Force reprocessing enabled - ignoring cached results")
         
         try:
+            video = self.db_manager.get_video_by_id(video_id)
             # Step 1: Extract transcript
-            transcript_data = self.extract_transcript(video_path, force_reprocess)
+            transcript_data = self.extract_transcript(video, force_reprocess)
+            
+            if not transcript_data:
+                print(f"❌ Failed to extract transcript for video {video_id}")
+                return False
             
             # Step 2: Create semantic segments
-            segments = self.create_semantic_segments(transcript_data, force_reprocess)
+            segments = self.create_semantic_segments(video, transcript_data, force_reprocess)
             
             if not segments:
                 print("⚠️ No segments created, skipping video")
                 return False
             
             # Step 3: Analyze emotions (new step!)
-            segments_with_emotions = self.analyze_emotions(segments, force_reprocess)
+            segments_with_emotions = self.analyze_emotions(video, segments, force_reprocess)
             
             # Step 4: Generate embeddings
-            segments_with_embeddings = self.generate_embeddings(segments_with_emotions, force_reprocess)
+            segments_with_embeddings = self.generate_embeddings(video, segments_with_emotions, force_reprocess)
             
             # Step 6: Store in Pinecone
             self.store_in_pinecone(segments_with_embeddings)
             
             # Save similarity analysis
-            analysis_file = self.output_dir / f"{video_path.stem}_analysis.json"
+            analysis_file = self.output_dir / f"{video.title}_analysis.json"
             analysis_data = {
-                "video_name": video_path.name,
+                "video_id": video_id,
                 "total_segments": len(segments),
                 "average_segment_duration": np.mean([seg["duration"] for seg in segments]),
                 "emotion_analysis_enabled": self.enable_emotion_analysis,
@@ -724,41 +719,38 @@ class VideoProcessor:
             with open(analysis_file, "w", encoding="utf-8") as f:
                 json.dump(analysis_data, f, indent=2)
             
-            print(f"✅ Successfully processed {video_path.name}")
+            print(f"✅ Successfully processed video {video_id}")
             return True
             
         except Exception as e:
-            print(f"❌ Error processing {video_path.name}: {e}")
+            print(f"❌ Error processing video {video_id}: {e}")
             return False
 
-    def process_all_videos(self, force_reprocess: bool = False) -> Dict[str, Any]:
+    def process_videos_from_database(self, playlist_id: Optional[int] = None, force_reprocess: bool = False) -> Dict[str, Any]:
         """
-        Process all videos in the downloads directory.
+        Process all pending videos from the database.
         
         Args:
+            playlist_id: Optional playlist ID to filter by
             force_reprocess: If True, reprocess all steps even if cached results exist
         
         Returns:
             Summary of processing results
         """
-        print(f"🚀 Starting batch processing of videos in {self.downloads_dir}")
+        print(f"🚀 Starting batch processing of videos from database")
         if force_reprocess:
             print("🔄 Force reprocessing enabled - ignoring all cached results")
         
         emotion_status = "enabled" if self.enable_emotion_analysis else "disabled"
         print(f"😊 Emotion analysis: {emotion_status}")
         
-        # Find all video files
-        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
-        video_files = [
-            f for f in self.downloads_dir.iterdir() 
-            if f.is_file() and f.suffix.lower() in video_extensions and not f.name.endswith('.part')
-        ]
+        # Get videos that need processing using DAO function directly
+        videos = self.db_manager.get_videos_for_processing(playlist_id, "embedded")
         
-        print(f"📁 Found {len(video_files)} video files to process")
+        print(f"📁 Found {len(videos)} videos to process from database")
         
-        if not video_files:
-            print("⚠️ No video files found")
+        if not videos:
+            print("⚠️ No videos found that need processing")
             return {"total_videos": 0, "successful": 0, "failed": 0}
         
         # Process each video
@@ -766,22 +758,27 @@ class VideoProcessor:
         failed = 0
         results = []
         
-        for i, video_file in enumerate(video_files, 1):
-            print(f"\n📹 Processing video {i}/{len(video_files)}")
+        for i, video in enumerate(videos, 1):
+            video_id = video["id"]
+            title = video["title"][:60] + "..." if len(video["title"]) > 60 else video["title"]
             
-            if self.process_single_video(video_file, force_reprocess):
+            print(f"\n📹 Processing video {i}/{len(videos)}: {title}")
+            print(f"   Video ID: {video_id}")
+            
+            if self.process_single_video(video_id, force_reprocess):
                 successful += 1
-                results.append({"video": video_file.name, "status": "success"})
+                results.append({"video_id": video_id, "status": "success"})
             else:
                 failed += 1
-                results.append({"video": video_file.name, "status": "failed"})
+                results.append({"video_id": video_id, "status": "failed"})
         
         # Save batch processing summary
         summary = {
-            "total_videos": len(video_files),
+            "total_videos": len(videos),
             "successful": successful,
             "failed": failed,
             "results": results,
+            "playlist_id": playlist_id,
             "emotion_analysis_enabled": self.enable_emotion_analysis,
             "embedding_type": self.embedding_type,
             "processed_at": datetime.now().isoformat()
@@ -794,21 +791,46 @@ class VideoProcessor:
         print(f"\n🎉 Batch processing complete!")
         print(f"✅ Successful: {successful}")
         print(f"❌ Failed: {failed}")
-        print(f"📊 Success rate: {successful/len(video_files)*100:.1f}%")
+        if len(videos) > 0:
+            print(f"📊 Success rate: {successful/len(videos)*100:.1f}%")
         print(f"😊 Emotion analysis: {emotion_status}")
         
         return summary
 
 def main():
     """Main function to run the video processing pipeline."""
-    print("🎬 Video Processing Pipeline with Emotion Analysis")
+    parser = argparse.ArgumentParser(
+        description="Video Processing Pipeline with Database Integration",
+        epilog="""
+Examples:
+  python process_video.py --video-id 123
+  python process_video.py --playlist-id 456
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("--video-id", type=int, help="Process a specific video by database ID")
+    parser.add_argument("--playlist-id", type=int, help="Filter by playlist ID when batch processing")
+    parser.add_argument("--force-reprocess", action="store_true", help="Reprocess even if cached results exist")
+    parser.add_argument("--embedding-type", choices=["local", "openai"], default="openai", help="Embedding method to use")
+    parser.add_argument("--local-model", default="all-MiniLM-L6-v2", help="Local model name for sentence transformers")
+    parser.add_argument("--disable-emotions", action="store_true", help="Disable emotion analysis")
+    
+    args = parser.parse_args()
+    
+    print("🎬 Video Processing Pipeline with Database Integration")
     print("=" * 60)
     
-    # Configuration options
-    embedding_type = os.getenv("EMBEDDING_TYPE", "local").lower()
-    local_model = os.getenv("LOCAL_MODEL", "all-MiniLM-L6-v2")
-    force_reprocess = os.getenv("FORCE_REPROCESS", "false").lower() in ("true", "1", "yes")
-    enable_emotions = os.getenv("ENABLE_EMOTION_ANALYSIS", "true").lower() in ("true", "1", "yes")
+    # Validate arguments
+    if not args.video_id and not args.batch_process:
+        print("❌ Must specify either --video-id or --batch-process")
+        parser.print_help()
+        return
+    
+    # Configuration
+    embedding_type = args.embedding_type
+    local_model = args.local_model
+    force_reprocess = args.force_reprocess
+    enable_emotions = not args.disable_emotions
     
     print(f"🔧 Configuration:")
     print(f"   Embedding type: {embedding_type}")
@@ -818,8 +840,8 @@ def main():
     print(f"   Emotion analysis: {'enabled' if enable_emotions else 'disabled'}")
     print()
     
-    # Check required environment variables based on embedding type
-    required_env_vars = ["PINECONE_API_KEY"]
+    # Check required environment variables
+    required_env_vars = ["PINECONE_API_KEY", "DATABASE_URL"]
     if embedding_type == "openai":
         required_env_vars.append("OPENAI_API_KEY")
     
@@ -828,8 +850,6 @@ def main():
     if missing_vars:
         print(f"❌ Missing required environment variables: {', '.join(missing_vars)}")
         print("Please set them in your .env file or environment")
-        if embedding_type == "local":
-            print("💡 Tip: Using local embeddings only requires PINECONE_API_KEY")
         return
     
     try:
@@ -840,24 +860,39 @@ def main():
             enable_emotion_analysis=enable_emotions
         )
         
-        # Process all videos
-        summary = processor.process_all_videos(force_reprocess)
-        
-        print(f"\n📋 Processing Summary:")
-        print(f"   Total videos: {summary['total_videos']}")
-        print(f"   Successful: {summary['successful']}")
-        print(f"   Failed: {summary['failed']}")
-        print(f"   Embedding type: {embedding_type}")
-        print(f"   Emotion analysis: {'enabled' if enable_emotions else 'disabled'}")
-        
-        if summary['successful'] > 0:
-            print(f"\n🔍 You can now search your video segments using Pinecone!")
-            print(f"   Index name: {processor.index_name}")
-            print(f"   Embedding dimensions: {processor.embedding_dimensions}")
-            if enable_emotions:
-                print(f"   ✨ Segments include emotion analysis with 28 emotion categories!")
-                print(f"   📊 Search and filter by emotions: joy, sadness, anger, excitement, etc.")
-            print(f"   Search with: python search_segments.py \"your query\"")
+        if args.video_id:
+            # Process single video
+            print(f"🎯 Processing single video: {args.video_id}")
+            success = processor.process_single_video(args.video_id, force_reprocess)
+            
+            if success:
+                print(f"✅ Successfully processed video {args.video_id}")
+            else:
+                print(f"❌ Failed to process video {args.video_id}")
+                
+        elif args.playlist_id:
+            # Process videos from database
+            summary = processor.process_videos_from_database(
+                playlist_id=args.playlist_id,
+                force_reprocess=force_reprocess
+            )
+            
+            print(f"\n📋 Processing Summary:")
+            print(f"   Total videos: {summary['total_videos']}")
+            print(f"   Successful: {summary['successful']}")
+            print(f"   Failed: {summary['failed']}")
+            print(f"   Playlist ID: {args.playlist_id}")
+            print(f"   Embedding type: {embedding_type}")
+            print(f"   Emotion analysis: {'enabled' if enable_emotions else 'disabled'}")
+            
+            if summary['successful'] > 0:
+                print(f"\n🔍 You can now search your video segments using Pinecone!")
+                print(f"   Index name: {processor.index_name}")
+                print(f"   Embedding dimensions: {processor.embedding_dimensions}")
+                if enable_emotions:
+                    print(f"   ✨ Segments include emotion analysis with 28 emotion categories!")
+                    print(f"   📊 Search and filter by emotions: joy, sadness, anger, excitement, etc.")
+                print(f"   Search with: python search_segments.py \"your query\"")
         
     except Exception as e:
         print(f"❌ Pipeline failed: {e}")

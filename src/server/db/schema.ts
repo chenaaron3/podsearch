@@ -1,5 +1,5 @@
-import { relations, sql } from 'drizzle-orm';
-import { index, pgTableCreator, primaryKey } from 'drizzle-orm/pg-core';
+import { relations, sql } from "drizzle-orm";
+import { index, pgTableCreator, primaryKey } from "drizzle-orm/pg-core";
 
 import type { AdapterAccount } from "next-auth/adapters";
 /**
@@ -142,6 +142,9 @@ export const videos = createTable(
     playlistId: d
       .integer()
       .references(() => playlists.id, { onDelete: "cascade" }),
+    transcriptId: d
+      .integer()
+      .references(() => transcripts.id, { onDelete: "set null" }),
     title: d.varchar({ length: 500 }).notNull(),
     description: d.text(),
     duration: d.integer(), // duration in seconds
@@ -163,9 +166,28 @@ export const videos = createTable(
   (t) => [
     index("video_youtube_id_idx").on(t.youtubeId),
     index("video_playlist_id_idx").on(t.playlistId),
+    index("video_transcript_id_idx").on(t.transcriptId),
     index("video_status_idx").on(t.status),
     index("video_published_at_idx").on(t.publishedAt),
   ],
+);
+
+// Transcripts table for storing transcript data
+export const transcripts = createTable(
+  "transcript",
+  (d) => ({
+    id: d.integer().primaryKey().generatedByDefaultAsIdentity(),
+    language: d.varchar({ length: 10 }).default("en"),
+    // Store the complete transcript data as JSON
+    segments: d.jsonb(), // Array of transcript segments with timestamps
+    processingMetadata: d.jsonb(), // Metadata about processing (model, version, etc.)
+    createdAt: d
+      .timestamp({ withTimezone: true })
+      .default(sql`CURRENT_TIMESTAMP`)
+      .notNull(),
+    updatedAt: d.timestamp({ withTimezone: true }).$onUpdate(() => new Date()),
+  }),
+  (t) => [index("transcript_language_idx").on(t.language)],
 );
 
 export const playlistsRelations = relations(playlists, ({ many }) => ({
@@ -176,5 +198,16 @@ export const videosRelations = relations(videos, ({ one }) => ({
   playlist: one(playlists, {
     fields: [videos.playlistId],
     references: [playlists.id],
+  }),
+  transcript: one(transcripts, {
+    fields: [videos.transcriptId],
+    references: [transcripts.id],
+  }),
+}));
+
+export const transcriptsRelations = relations(transcripts, ({ one }) => ({
+  video: one(videos, {
+    fields: [transcripts.id],
+    references: [videos.transcriptId],
   }),
 }));

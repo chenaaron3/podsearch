@@ -5,15 +5,72 @@ Matches the Drizzle schema in schema.ts
 """
 
 import os
+import json
 from datetime import datetime
-from typing import Optional, List
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Index
+from typing import Optional, List, Dict, Any, TypedDict
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Index, Boolean, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 from sqlalchemy.sql import func
+from sqlalchemy.dialects.postgresql import JSONB
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Type definitions for transcript data
+class TranscriptSegment(TypedDict):
+    id: int
+    start: float
+    end: float
+    text: str
+    words: Optional[List[Dict[str, Any]]]
+
+class TranscriptData(TypedDict):
+    language: str
+    segments: List[TranscriptSegment]
+    processed_at: str
+
+class SemanticSegment(TypedDict):
+    segment_id: int
+    video_id: int
+    video_name: str
+    start_time: float
+    end_time: float
+    duration: float
+    text: str
+    source_segments: List[int]
+    timestamp_readable: str
+
+class EmotionScore(TypedDict):
+    emotion: str
+    score: float
+
+class SegmentWithEmotion(SemanticSegment):
+    emotions: Dict[str, float]
+    primary_emotion: str
+    primary_emotion_score: float
+
+class SegmentWithEmbedding(SegmentWithEmotion):
+    embedding: List[float]
+    embedding_model: str
+    embedding_type: str
+    embedding_dimensions: int
+
+class PineconeMetadata(TypedDict):
+    video_id: int
+    video_name: str
+    segment_id: int
+    start_time: float
+    end_time: float
+    duration: float
+    timestamp_readable: str
+    primary_emotion: Optional[str]
+    primary_emotion_score: Optional[float]
+
+class PineconeVector(TypedDict):
+    id: str
+    values: List[float]
+    metadata: PineconeMetadata
 
 Base = declarative_base()
 
@@ -54,12 +111,31 @@ class Playlist(Base):
         Index("playlist_channel_id_idx", "channelId"),
     )
 
+class Transcript(Base):
+    __tablename__ = "podsearch_transcript"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    language = Column(String(10), default="en")
+    segments = Column(JSONB)  # Array of transcript segments with timestamps
+    processing_metadata = Column("processingMetadata", JSONB)  # Metadata about processing
+    created_at = Column("createdAt", DateTime(timezone=True), default=func.now(), nullable=False)
+    updated_at = Column("updatedAt", DateTime(timezone=True), onupdate=func.now())
+    
+    # Relationships
+    video = relationship("Video", back_populates="transcript", uselist=False)
+    
+    # Indexes
+    __table_args__ = (
+        Index("transcript_language_idx", "language"),
+    )
+
 class Video(Base):
     __tablename__ = "podsearch_video"
     
     id = Column(Integer, primary_key=True, autoincrement=True)  
     youtube_id = Column("youtubeId", String(255), nullable=False, unique=True)
     playlist_id = Column("playlistId", Integer, ForeignKey("podsearch_playlist.id", ondelete="CASCADE"))
+    transcript_id = Column("transcriptId", Integer, ForeignKey("podsearch_transcript.id", ondelete="SET NULL"))
     title = Column(String(500), nullable=False)
     description = Column(Text)
     duration = Column(Integer)  # duration in seconds
@@ -77,11 +153,13 @@ class Video(Base):
     
     # Relationships
     playlist = relationship("Playlist", back_populates="videos")
+    transcript = relationship("Transcript", back_populates="video", uselist=False)
     
     # Indexes
     __table_args__ = (
         Index("video_youtube_id_idx", "youtubeId"),
         Index("video_playlist_id_idx", "playlistId"),
+        Index("video_transcript_id_idx", "transcriptId"),
         Index("video_status_idx", "status"),
         Index("video_published_at_idx", "publishedAt"),
     )
@@ -198,6 +276,104 @@ class DatabaseManager:
         """Get videos ready for processing."""
         return self.get_videos_by_status(VideoStatus.PENDING, playlist_id)
     
+    def get_video_by_id(self, video_id: int) -> Optional[Video]:
+        """Get a video by its database ID."""
+        with self.get_session() as session:
+            return session.query(Video).filter(Video.id == video_id).first()
+    
+    def save_transcript_data(self, video_id: int, transcript_data: TranscriptData) -> bool:
+        """
+        Save transcript data to database using ORM.
+        
+        Args:
+            video_id: Database ID of the video
+            transcript_data: Transcript data to save
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self.get_session() as session:
+                # Get the video
+                video = session.query(Video).filter(Video.id == video_id).first()
+                if not video:
+                    print(f"❌ Video with ID {video_id} not found")
+                    return False
+                
+                # Check if video already has a transcript
+                if video.transcript_id:
+                    # Update existing transcript
+                    transcript = session.query(Transcript).filter(Transcript.id == video.transcript_id).first()
+                    if transcript:
+                        transcript.language = transcript_data["language"]
+                        transcript.segments = transcript_data["segments"]
+                        transcript.processing_metadata = {
+                            "processed_at": transcript_data["processed_at"],
+                            "segments_count": len(transcript_data["segments"])
+                        }
+                        transcript.updated_at = datetime.now()
+                else:
+                    # Create new transcript
+                    transcript = Transcript(
+                        language=transcript_data["language"],
+                        segments=transcript_data["segments"],
+                        processing_metadata={
+                            "processed_at": transcript_data["processed_at"],
+                            "segments_count": len(transcript_data["segments"])
+                        }
+                    )
+                    session.add(transcript)
+                    session.flush()  # Get the transcript ID
+                    
+                    # Link transcript to video
+                    video.transcript_id = transcript.id
+                
+                # Update video timestamp
+                video.updated_at = datetime.now()
+                
+                session.commit()
+                print(f"✅ Transcript saved to database for video {video_id}")
+                return True
+                
+        except Exception as e:
+            print(f"❌ Error saving transcript to database: {e}")
+            return False
+    
+    def get_videos_for_processing(self, playlist_id: Optional[int] = None, status_filter: str = "pending") -> List[Dict[str, Any]]:
+        """
+        Get videos from database that need processing using ORM.
+        
+        Args:
+            playlist_id: Optional playlist ID to filter by
+            status_filter: Status to filter by (pending, downloaded, etc.)
+            
+        Returns:
+            List of video records as dictionaries
+        """
+        try:
+            with self.get_session() as session:
+                query = session.query(Video).filter(Video.status == status_filter)
+                
+                if playlist_id:
+                    query = query.filter(Video.playlist_id == playlist_id)
+                    
+                videos_orm = query.order_by(Video.published_at.desc()).all()
+                
+                videos = []
+                for video in videos_orm:
+                    videos.append({
+                        "id": video.id,
+                        "youtube_id": video.youtube_id,
+                        "title": video.title,
+                        "local_file_path": video.local_file_path,
+                        "duration": video.duration
+                    })
+                
+                return videos
+        except Exception as e:
+            print(f"❌ Error fetching videos from database: {e}")
+            return []
+
     def update_playlist_sync(self, playlist_id: int, total_videos: int):
         """Update playlist sync information.""" 
         with self.get_session() as session:
