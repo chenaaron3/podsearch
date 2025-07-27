@@ -6,6 +6,7 @@ Matches the Drizzle schema in schema.ts
 
 import os
 import json
+import time
 from datetime import datetime
 from typing import Optional, List, Dict, Any, TypedDict
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Index, Boolean, Float
@@ -13,6 +14,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.exc import OperationalError, DisconnectionError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -165,7 +167,7 @@ class Video(Base):
 
 class DatabaseManager:
     def __init__(self, database_url: Optional[str] = None):
-        """Initialize database connection."""
+        """Initialize database connection with connection resilience."""
         self.database_url = database_url or os.getenv("DATABASE_URL")
         if not self.database_url:
             raise ValueError("DATABASE_URL environment variable is required")
@@ -174,12 +176,105 @@ class DatabaseManager:
         if self.database_url.startswith('postgres://'):
             self.database_url = self.database_url.replace('postgres://', 'postgresql://', 1)
         
-        self.engine = create_engine(self.database_url)
+        # Configure engine with connection resilience
+        self.engine = create_engine(
+            self.database_url,
+            # Connection pool settings for resilience
+            pool_size=5,  # Number of connections to maintain
+            max_overflow=10,  # Additional connections when pool is full
+            pool_timeout=30,  # Timeout for getting connection from pool
+            pool_recycle=3600,  # Recycle connections after 1 hour
+            pool_pre_ping=True,  # Test connections before use
+            # Connection settings
+            connect_args={
+                "connect_timeout": 10,  # Connection timeout
+                "application_name": "podsearch_pipeline",  # Identify connections
+                "keepalives_idle": 30,  # Send keepalive after 30s of inactivity
+                "keepalives_interval": 10,  # Send keepalive every 10s
+                "keepalives_count": 5,  # Give up after 5 failed keepalives
+            }
+        )
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
     
     def get_session(self) -> Session:
-        """Get a database session."""
+        """Get a database session with retry logic for connection resilience."""
         return self.SessionLocal()
+    
+    def execute_with_retry(self, operation, max_retries=3, base_delay=1):
+        """
+        Execute a database operation with retry logic for connection resilience.
+        
+        Args:
+            operation: Function that takes a session and performs the operation
+            max_retries: Maximum number of retry attempts
+            base_delay: Base delay between retries (will be exponential)
+            
+        Returns:
+            Result of the operation if successful
+            
+        Raises:
+            Exception: If all retries fail
+        """
+        last_exception = None
+        
+        for attempt in range(max_retries + 1):
+            try:
+                with self.get_session() as session:
+                    result = operation(session)
+                    return result
+                    
+            except (OperationalError, DisconnectionError) as e:
+                last_exception = e
+                
+                # Check if it's an SSL connection error
+                if "SSL connection has been closed" in str(e) or "connection" in str(e).lower():
+                    if attempt < max_retries:
+                        delay = base_delay * (2 ** attempt)  # Exponential backoff
+                        print(f"⚠️ Database connection error (attempt {attempt + 1}/{max_retries + 1}): {e}")
+                        print(f"   Retrying in {delay} seconds...")
+                        time.sleep(delay)
+                        
+                        # Force engine to dispose and recreate connections
+                        if attempt == max_retries - 1:  # Last retry attempt
+                            print("   Recreating database engine...")
+                            self.engine.dispose()
+                        continue
+                    else:
+                        print(f"❌ Database connection failed after {max_retries + 1} attempts")
+                        raise
+                else:
+                    # Non-connection related error, don't retry
+                    raise
+                    
+            except Exception as e:
+                # Non-connection related error, don't retry
+                raise
+                
+        # This should never be reached, but just in case
+        raise last_exception or Exception("Unknown database error")
+    
+    def test_connection(self) -> bool:
+        """Test database connection with a simple query."""
+        def test_operation(session):
+            session.execute("SELECT 1")
+            return True
+        
+        try:
+            self.execute_with_retry(test_operation)
+            return True
+        except Exception as e:
+            print(f"❌ Database connection test failed: {e}")
+            return False
+    
+    def get_connection_info(self) -> Dict[str, Any]:
+        """Get information about the current database connection."""
+        return {
+            "pool_size": self.engine.pool.size(),
+            "checked_in": self.engine.pool.checkedin(),
+            "checked_out": self.engine.pool.checkedout(),
+            "overflow": self.engine.pool.overflow(),
+            "invalid": self.engine.pool.invalid()
+        }
     
     def get_or_create_playlist(self, youtube_id: str, title: str, description: str = None, 
                               channel_name: str = None, channel_id: str = None, 
@@ -282,7 +377,7 @@ class DatabaseManager:
     
     def save_transcript_data(self, video_id: int, transcript_data: TranscriptData) -> bool:
         """
-        Save transcript data to database using ORM.
+        Save transcript data to database using ORM with connection resilience.
         
         Args:
             video_id: Database ID of the video
@@ -291,88 +386,54 @@ class DatabaseManager:
         Returns:
             True if successful, False otherwise
         """
+        def save_operation(session):
+            # Get the video
+            video = session.query(Video).filter(Video.id == video_id).first()
+            if not video:
+                print(f"❌ Video with ID {video_id} not found")
+                return False
+            
+            # Check if video already has a transcript
+            if video.transcript_id:
+                # Update existing transcript
+                transcript = session.query(Transcript).filter(Transcript.id == video.transcript_id).first()
+                if transcript:
+                    transcript.language = transcript_data["language"]
+                    transcript.segments = transcript_data["segments"]
+                    transcript.processing_metadata = {
+                        "processed_at": transcript_data["processed_at"],
+                        "segments_count": len(transcript_data["segments"])
+                    }
+                    transcript.updated_at = datetime.now()
+            else:
+                # Create new transcript
+                transcript = Transcript(
+                    language=transcript_data["language"],
+                    segments=transcript_data["segments"],
+                    processing_metadata={
+                        "processed_at": transcript_data["processed_at"],
+                        "segments_count": len(transcript_data["segments"])
+                    }
+                )
+                session.add(transcript)
+                session.flush()  # Get the transcript ID
+                
+                # Link transcript to video
+                video.transcript_id = transcript.id
+            
+            # Update video timestamp
+            video.updated_at = datetime.now()
+            
+            session.commit()
+            print(f"✅ Transcript saved to database for video {video_id}")
+            return True
+        
         try:
-            with self.get_session() as session:
-                # Get the video
-                video = session.query(Video).filter(Video.id == video_id).first()
-                if not video:
-                    print(f"❌ Video with ID {video_id} not found")
-                    return False
-                
-                # Check if video already has a transcript
-                if video.transcript_id:
-                    # Update existing transcript
-                    transcript = session.query(Transcript).filter(Transcript.id == video.transcript_id).first()
-                    if transcript:
-                        transcript.language = transcript_data["language"]
-                        transcript.segments = transcript_data["segments"]
-                        transcript.processing_metadata = {
-                            "processed_at": transcript_data["processed_at"],
-                            "segments_count": len(transcript_data["segments"])
-                        }
-                        transcript.updated_at = datetime.now()
-                else:
-                    # Create new transcript
-                    transcript = Transcript(
-                        language=transcript_data["language"],
-                        segments=transcript_data["segments"],
-                        processing_metadata={
-                            "processed_at": transcript_data["processed_at"],
-                            "segments_count": len(transcript_data["segments"])
-                        }
-                    )
-                    session.add(transcript)
-                    session.flush()  # Get the transcript ID
-                    
-                    # Link transcript to video
-                    video.transcript_id = transcript.id
-                
-                # Update video timestamp
-                video.updated_at = datetime.now()
-                
-                session.commit()
-                print(f"✅ Transcript saved to database for video {video_id}")
-                return True
-                
+            return self.execute_with_retry(save_operation)
         except Exception as e:
             print(f"❌ Error saving transcript to database: {e}")
             return False
     
-    def get_videos_for_processing(self, playlist_id: Optional[int] = None, status_filter: str = "pending") -> List[Dict[str, Any]]:
-        """
-        Get videos from database that need processing using ORM.
-        
-        Args:
-            playlist_id: Optional playlist ID to filter by
-            status_filter: Status to filter by (pending, downloaded, etc.)
-            
-        Returns:
-            List of video records as dictionaries
-        """
-        try:
-            with self.get_session() as session:
-                query = session.query(Video).filter(Video.status == status_filter)
-                
-                if playlist_id:
-                    query = query.filter(Video.playlist_id == playlist_id)
-                    
-                videos_orm = query.order_by(Video.published_at.desc()).all()
-                
-                videos = []
-                for video in videos_orm:
-                    videos.append({
-                        "id": video.id,
-                        "youtube_id": video.youtube_id,
-                        "title": video.title,
-                        "local_file_path": video.local_file_path,
-                        "duration": video.duration
-                    })
-                
-                return videos
-        except Exception as e:
-            print(f"❌ Error fetching videos from database: {e}")
-            return []
-
     def update_playlist_sync(self, playlist_id: int, total_videos: int):
         """Update playlist sync information.""" 
         with self.get_session() as session:
@@ -382,3 +443,8 @@ class DatabaseManager:
                 playlist.last_sync_at = datetime.now()
                 playlist.updated_at = datetime.now()
                 session.commit() 
+
+    def get_playlist_by_id(self, playlist_id: int) -> Optional[Playlist]:
+        """Get a playlist by its database ID."""
+        with self.get_session() as session:
+            return session.query(Playlist).filter(Playlist.id == playlist_id).first()

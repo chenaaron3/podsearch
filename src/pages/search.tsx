@@ -18,84 +18,35 @@ type SearchSegment = {
     emotionScore?: number;
 };
 
-type SearchPhase = "input" | "clarifying" | "results";
+type SearchPhase = "input" | "results";
 
 export default function Search() {
     const [searchQuery, setSearchQuery] = useState("");
     const [currentPhase, setCurrentPhase] = useState<SearchPhase>("input");
-    const [broadResults, setBroadResults] = useState<SearchSegment[]>([]);
-    const [clarifyingQuestions, setClarifyingQuestions] = useState<string[]>([]);
-    const [clarifyingAnswers, setClarifyingAnswers] = useState<string[]>([]);
-    const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
     const [finalResults, setFinalResults] = useState<SearchSegment[]>([]);
-    const [currentAnswer, setCurrentAnswer] = useState("");
 
     // tRPC queries and mutations
     const [isSearching, setIsSearching] = useState(false);
-    const clarifyingQuestionsMutation = api.search.generateClarifyingQuestions.useMutation();
-    const refinedSearchMutation = api.search.refinedSearch.useMutation();
     const utils = api.useUtils();
 
-    const handleInitialSearch = async () => {
+    const handleSearch = async () => {
         if (!searchQuery.trim()) return;
 
         try {
             setIsSearching(true);
-            setCurrentPhase("clarifying");
 
-            // Step 1: Perform broad search
-            const searchResults = await utils.search.broadSearch.fetch({
+            // Perform smart search
+            const searchResults = await utils.search.smartSearch.fetch({
                 query: searchQuery,
-                topK: 15,
+                topK: 5,
             });
 
-            setBroadResults(searchResults.segments);
-
-            // Step 2: Generate clarifying questions
-            const questionsResponse = await clarifyingQuestionsMutation.mutateAsync({
-                originalQuery: searchQuery,
-                searchResults: searchResults.segments,
-            });
-
-            setClarifyingQuestions(questionsResponse.questions);
-            setCurrentQuestionIndex(0);
-            setClarifyingAnswers([]);
+            setFinalResults(searchResults.segments);
+            setCurrentPhase("results");
         } catch (error) {
             console.error("Search failed:", error);
         } finally {
             setIsSearching(false);
-        }
-    };
-
-    const handleAnswerSubmit = () => {
-        if (!currentAnswer.trim()) return;
-
-        const newAnswers = [...clarifyingAnswers, currentAnswer];
-        setClarifyingAnswers(newAnswers);
-        setCurrentAnswer("");
-
-        if (currentQuestionIndex < clarifyingQuestions.length - 1) {
-            // More questions to ask
-            setCurrentQuestionIndex(currentQuestionIndex + 1);
-        } else {
-            // All questions answered, perform refined search
-            void performRefinedSearch(newAnswers);
-        }
-    };
-
-    const performRefinedSearch = async (answers: string[]) => {
-        try {
-            const refinedResults = await refinedSearchMutation.mutateAsync({
-                originalQuery: searchQuery,
-                clarifyingAnswers: answers,
-                originalResults: broadResults,
-                targetCount: 5,
-            });
-
-            setFinalResults(refinedResults.segments);
-            setCurrentPhase("results");
-        } catch (error) {
-            console.error("Refined search failed:", error);
         }
     };
 
@@ -117,12 +68,7 @@ export default function Search() {
     const resetSearch = () => {
         setSearchQuery("");
         setCurrentPhase("input");
-        setBroadResults([]);
-        setClarifyingQuestions([]);
-        setClarifyingAnswers([]);
-        setCurrentQuestionIndex(0);
         setFinalResults([]);
-        setCurrentAnswer("");
     };
 
     return (
@@ -160,96 +106,22 @@ export default function Search() {
                                         placeholder="e.g., building a successful startup, overcoming fear of failure, leadership advice..."
                                         className="w-full p-4 rounded-xl bg-white/10 border border-white/30 text-white placeholder-slate-400 resize-none"
                                         rows={3}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter' && !e.shiftKey) {
+                                                e.preventDefault();
+                                                void handleSearch();
+                                            }
+                                        }}
                                     />
 
                                     <button
-                                        onClick={handleInitialSearch}
+                                        onClick={() => void handleSearch()}
                                         disabled={!searchQuery.trim() || isSearching}
                                         className="w-full py-3 px-6 bg-gradient-to-r from-purple-600 to-blue-600 text-white font-semibold rounded-xl hover:from-purple-700 hover:to-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                                     >
-                                        {isSearching ? "Searching..." : "Search Episodes"}
+                                        {isSearching ? "Finding your clips..." : "Search Episodes"}
                                     </button>
                                 </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Clarifying Questions Phase */}
-                    {currentPhase === "clarifying" && (
-                        <div className="max-w-2xl mx-auto">
-                            <div className="bg-white/10 backdrop-blur-md rounded-2xl p-8 border border-white/20">
-                                <div className="mb-6">
-                                    <div className="flex justify-between items-center mb-4">
-                                        <h2 className="text-xl font-semibold text-white">
-                                            Help me understand what you&apos;re looking for
-                                        </h2>
-                                        <span className="text-slate-400 text-sm">
-                                            {currentQuestionIndex + 1} of {clarifyingQuestions.length}
-                                        </span>
-                                    </div>
-
-                                    {/* Progress bar */}
-                                    <div className="w-full bg-white/20 rounded-full h-2 mb-6">
-                                        <div
-                                            className="bg-gradient-to-r from-purple-500 to-blue-500 h-2 rounded-full transition-all duration-300"
-                                            style={{ width: `${((currentQuestionIndex + 1) / clarifyingQuestions.length) * 100}%` }}
-                                        />
-                                    </div>
-                                </div>
-
-                                {/* Previous answers */}
-                                {clarifyingAnswers.map((answer, index) => (
-                                    <div key={index} className="mb-4 p-3 bg-white/5 rounded-lg border-l-4 border-green-500">
-                                        <p className="text-slate-400 text-sm mb-1">
-                                            Q{index + 1}: {clarifyingQuestions[index]}
-                                        </p>
-                                        <p className="text-white">{answer}</p>
-                                    </div>
-                                ))}
-
-                                {/* Current question */}
-                                {clarifyingQuestions[currentQuestionIndex] && (
-                                    <div className="space-y-4">
-                                        <div className="p-4 bg-gradient-to-r from-purple-600/20 to-blue-600/20 rounded-xl border border-purple-500/30">
-                                            <p className="text-white text-lg">
-                                                {clarifyingQuestions[currentQuestionIndex]}
-                                            </p>
-                                        </div>
-
-                                        <textarea
-                                            value={currentAnswer}
-                                            onChange={(e) => setCurrentAnswer(e.target.value)}
-                                            placeholder="Your answer..."
-                                            className="w-full p-4 rounded-xl bg-white/10 border border-white/30 text-white placeholder-slate-400 resize-none"
-                                            rows={2}
-                                            onKeyDown={(e) => {
-                                                if (e.key === 'Enter' && !e.shiftKey) {
-                                                    e.preventDefault();
-                                                    handleAnswerSubmit();
-                                                }
-                                            }}
-                                        />
-
-                                        <div className="flex space-x-3">
-                                            <button
-                                                onClick={handleAnswerSubmit}
-                                                disabled={!currentAnswer.trim() || refinedSearchMutation.isPending}
-                                                className="flex-1 py-3 px-6 bg-gradient-to-r from-purple-600 to-blue-600 text-white font-semibold rounded-xl hover:from-purple-700 hover:to-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                                            >
-                                                {currentQuestionIndex === clarifyingQuestions.length - 1
-                                                    ? (refinedSearchMutation.isPending ? "Finding clips..." : "Find My Clips")
-                                                    : "Next Question"}
-                                            </button>
-
-                                            <button
-                                                onClick={resetSearch}
-                                                className="px-6 py-3 bg-white/10 text-white rounded-xl hover:bg-white/20 transition-all"
-                                            >
-                                                Start Over
-                                            </button>
-                                        </div>
-                                    </div>
-                                )}
                             </div>
                         </div>
                     )}
@@ -262,7 +134,7 @@ export default function Search() {
                                     Your Personalized Clips
                                 </h2>
                                 <p className="text-slate-300 mb-4">
-                                    Found {finalResults.length} clips based on your preferences
+                                    Found {finalResults.length} clips based on your query
                                 </p>
                                 <button
                                     onClick={resetSearch}

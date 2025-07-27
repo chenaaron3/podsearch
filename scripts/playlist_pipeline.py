@@ -31,6 +31,16 @@ class PlaylistPipeline:
                  processed_dir: str = "./processed"):
         """Initialize the complete pipeline."""
         self.db_manager = DatabaseManager()
+        
+        # Test database connection at startup
+        print("🔍 Testing database connection...")
+        if not self.db_manager.test_connection():
+            raise RuntimeError("Database connection test failed. Please check your DATABASE_URL.")
+        
+        # Show connection pool info
+        conn_info = self.db_manager.get_connection_info()
+        print(f"📊 Database connection pool: {conn_info['checked_out']}/{conn_info['pool_size']} active")
+        
         self.playlist_fetcher = PlaylistFetcher(self.db_manager)
         self.downloader = YouTubeDownloader(downloads_dir)
         self.processor = VideoProcessor(
@@ -69,9 +79,10 @@ class PlaylistPipeline:
             if not self._process_video(video):
                 return False
             
-            # Stage 3: Mark as finished
-            self.db_manager.update_video_status(video.id, VideoStatus.FINISHED)
             print(f"🎉 Video processing complete: {video.title[:50]}...")
+            
+            # Monitor connection health after each video
+            self.monitor_connection_health()
             
             return True
             
@@ -191,6 +202,15 @@ class PlaylistPipeline:
                     self.process_single_video(video)
         
         print("\n✅ Resume complete")
+    
+    def monitor_connection_health(self):
+        """Monitor database connection health and show pool status."""
+        try:
+            conn_info = self.db_manager.get_connection_info()
+            print(f"📊 Connection pool status: {conn_info['checked_out']}/{conn_info['pool_size']} active, "
+                  f"{conn_info['overflow']} overflow, {conn_info['invalid']} invalid")
+        except Exception as e:
+            print(f"⚠️ Could not get connection info: {e}")
 
 def main():
     """Main pipeline entry point."""
@@ -198,11 +218,13 @@ def main():
         description="YouTube Playlist/Channel Processing Pipeline",
         epilog="""
 Examples:
-  python playlist_pipeline.py "https://www.youtube.com/playlist?list=PLExample"
+  python playlist_pipeline.py --url "https://www.youtube.com/playlist?list=PLExample"
+  python playlist_pipeline.py --playlist-id 123
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("url", help="YouTube playlist or channel URL")
+    parser.add_argument("--url", help="YouTube playlist or channel URL")
+    parser.add_argument("--playlist-id", type=int, help="Filter by playlist ID when batch processing")
     parser.add_argument("--downloads-dir", default="./downloads", help="Downloads directory")
     parser.add_argument("--processed-dir", default="./processed", help="Processed output directory")
     
@@ -221,8 +243,11 @@ Examples:
             processed_dir=args.processed_dir
         )
         
-        # Sync playlist (always do this to get latest videos)
-        playlist, new_count = pipeline.sync_playlist(args.url)
+        if args.url:
+            # Sync playlist (always do this to get latest videos)
+            playlist, new_count = pipeline.sync_playlist(args.url)
+        elif args.playlist_id:
+            playlist = pipeline.db_manager.get_playlist_by_id(args.playlist_id)
         
         # Show current status
         pipeline.show_playlist_status(playlist.id)
