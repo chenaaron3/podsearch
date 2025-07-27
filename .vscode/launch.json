@@ -24,7 +24,7 @@
       "request": "launch",
       "program": "${file}",
       "console": "integratedTerminal",
-      "args": "'https://www.youtube.com/@TheDiaryOfACEO' ${command:pickArgs}"
+      "args": "${command:pickArgs}"
     }
   ]
 }

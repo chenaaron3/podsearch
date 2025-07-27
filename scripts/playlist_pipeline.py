@@ -32,15 +32,6 @@ class PlaylistPipeline:
         """Initialize the complete pipeline."""
         self.db_manager = DatabaseManager()
         
-        # Test database connection at startup
-        print("🔍 Testing database connection...")
-        if not self.db_manager.test_connection():
-            raise RuntimeError("Database connection test failed. Please check your DATABASE_URL.")
-        
-        # Show connection pool info
-        conn_info = self.db_manager.get_connection_info()
-        print(f"📊 Database connection pool: {conn_info['checked_out']}/{conn_info['pool_size']} active")
-        
         self.playlist_fetcher = PlaylistFetcher(self.db_manager)
         self.downloader = YouTubeDownloader(downloads_dir)
         self.processor = VideoProcessor(
@@ -80,9 +71,6 @@ class PlaylistPipeline:
                 return False
             
             print(f"🎉 Video processing complete: {video.title[:50]}...")
-            
-            # Monitor connection health after each video
-            self.monitor_connection_health()
             
             return True
             
@@ -202,15 +190,6 @@ class PlaylistPipeline:
                     self.process_single_video(video)
         
         print("\n✅ Resume complete")
-    
-    def monitor_connection_health(self):
-        """Monitor database connection health and show pool status."""
-        try:
-            conn_info = self.db_manager.get_connection_info()
-            print(f"📊 Connection pool status: {conn_info['checked_out']}/{conn_info['pool_size']} active, "
-                  f"{conn_info['overflow']} overflow, {conn_info['invalid']} invalid")
-        except Exception as e:
-            print(f"⚠️ Could not get connection info: {e}")
 
 def main():
     """Main pipeline entry point."""

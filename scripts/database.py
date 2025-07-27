@@ -41,6 +41,7 @@ class SemanticSegment(TypedDict):
     duration: float
     text: str
     timestamp_readable: str
+    source_segments: List[str]
 
 class EmotionScore(TypedDict):
     emotion: str
@@ -67,6 +68,7 @@ class PineconeMetadata(TypedDict):
     timestamp_readable: str
     primary_emotion: Optional[str]
     primary_emotion_score: Optional[float]
+    source_segments: List[str]
 
 class PineconeVector(TypedDict):
     id: str
@@ -252,30 +254,7 @@ class DatabaseManager:
                 
         # This should never be reached, but just in case
         raise last_exception or Exception("Unknown database error")
-    
-    def test_connection(self) -> bool:
-        """Test database connection with a simple query."""
-        def test_operation(session):
-            session.execute("SELECT 1")
-            return True
-        
-        try:
-            self.execute_with_retry(test_operation)
-            return True
-        except Exception as e:
-            print(f"❌ Database connection test failed: {e}")
-            return False
-    
-    def get_connection_info(self) -> Dict[str, Any]:
-        """Get information about the current database connection."""
-        return {
-            "pool_size": self.engine.pool.size(),
-            "checked_in": self.engine.pool.checkedin(),
-            "checked_out": self.engine.pool.checkedout(),
-            "overflow": self.engine.pool.overflow(),
-            "invalid": self.engine.pool.invalid()
-        }
-    
+
     def get_or_create_playlist(self, youtube_id: str, title: str, description: str = None, 
                               channel_name: str = None, channel_id: str = None, 
                               url: str = None) -> Playlist:

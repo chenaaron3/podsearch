@@ -43,6 +43,48 @@ interface PineconeMetadata {
   primary_emotion_score?: number;
 }
 
+// Types for structured LLM inputs and outputs
+interface RankingClipInput {
+  index: number;
+  title: string;
+  text: string;
+  timestamp: string;
+  emotion?: string;
+  score: number;
+}
+
+interface RankingOutputItem {
+  clipIndex: number;
+  reasoning: string;
+}
+
+type RankingOutput = RankingOutputItem[];
+
+interface SeekingWordInputItem {
+  w: string;
+  i: number;
+}
+
+type SeekingWordInput = SeekingWordInputItem[];
+
+interface SeekingOutput {
+  start_index: number;
+  reasoning: string;
+}
+
+// Validation schemas for LLM outputs
+const RankingOutputSchema = z.array(
+  z.object({
+    clipIndex: z.number().int().min(0),
+    reasoning: z.string().min(1),
+  }),
+);
+
+const SeekingOutputSchema = z.object({
+  start_index: z.number().int().min(0),
+  reasoning: z.string().min(1),
+});
+
 // Types for search results (defined for potential future use)
 
 const SearchSegment = z.object({
@@ -399,37 +441,32 @@ export const searchRouter = createTRPCRouter({
 
         // Step 6: Rank clips using the ranking prompt
         console.log("🏆 Step 6: Ranking clips using LLM...");
-        const clipsForRankingPrompt = clipsForRanking.map((clip, index) => ({
-          index,
-          title: clip.videoTitle,
-          text: clip.transcriptText.slice(0, 300),
-          timestamp: clip.timestampReadable,
-          emotion: clip.primaryEmotion,
-          score: clip.similarityScore,
-        }));
-
-        const clipsText = clipsForRankingPrompt
-          .map(
-            (clip, i) =>
-              `${i}. "${clip.title}" (${clip.timestamp}, Score: ${clip.score.toFixed(3)}): ${clip.text}... ${clip.emotion ? `[${clip.emotion}]` : ""}`,
-          )
-          .join("\n\n");
+        const clipsForRankingPrompt: RankingClipInput[] = clipsForRanking.map(
+          (clip, index) => ({
+            index,
+            title: clip.videoTitle,
+            text: clip.transcriptText.slice(0, 300),
+            timestamp: clip.timestampReadable,
+            emotion: clip.primaryEmotion,
+            score: clip.similarityScore,
+          }),
+        );
 
         const rankingPrompt = replacePromptPlaceholders(RANK_PROMPT, {
           query: input.query,
-          clips: clipsText,
+          clips: JSON.stringify(clipsForRankingPrompt, null, 2),
           clipCount: (clipsForRanking.length - 1).toString(),
           topK: input.topK.toString(),
         });
 
         console.log("🤖 Step 6: Calling GPT-4 for ranking...");
         const rankingCompletion = await openai.chat.completions.create({
-          model: "gpt-4",
+          model: "gpt-4o",
           messages: [
             {
               role: "system",
               content:
-                "You are an expert at understanding user intent and selecting the most relevant podcast segments. Always respond with a valid JSON array of numbers.",
+                "You are an expert at understanding user intent and selecting the most relevant podcast segments. You must respond with a JSON object containing a 'rankings' array. Each ranking object must have 'clipIndex' (integer) and 'reasoning' (string) fields.",
             },
             {
               role: "user",
@@ -437,7 +474,41 @@ export const searchRouter = createTRPCRouter({
             },
           ],
           temperature: 0.3,
-          max_tokens: 100,
+          max_tokens: 500,
+          response_format: {
+            type: "json_schema",
+            json_schema: {
+              name: "ranking_response",
+              strict: true,
+              schema: {
+                type: "object",
+                properties: {
+                  rankings: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      properties: {
+                        clipIndex: {
+                          type: "integer",
+                          description:
+                            "Index of the clip in the original list (0-based)",
+                        },
+                        reasoning: {
+                          type: "string",
+                          description:
+                            "Brief explanation of why this clip is ranked at this position",
+                        },
+                      },
+                      required: ["clipIndex", "reasoning"],
+                      additionalProperties: false,
+                    },
+                  },
+                },
+                required: ["rankings"],
+                additionalProperties: false,
+              },
+            },
+          },
         });
 
         const rankingResponse = rankingCompletion.choices[0]?.message?.content;
@@ -453,13 +524,24 @@ export const searchRouter = createTRPCRouter({
         });
 
         console.log("📊 Step 6: Ranking response:", rankingResponse);
-        const selectedIndices = JSON.parse(rankingResponse) as number[];
-        console.log("📊 Step 6: Selected indices:", selectedIndices);
 
-        const topClips = selectedIndices
-          .filter((index) => index >= 0 && index < clipsForRanking.length)
+        // Parse and validate ranking response
+        let rankingResults: RankingOutput;
+        try {
+          const parsedResponse = JSON.parse(rankingResponse);
+          // Handle both direct array and wrapped object formats
+          const rankingsArray = parsedResponse.rankings || parsedResponse;
+          rankingResults = RankingOutputSchema.parse(rankingsArray);
+        } catch (error) {
+          console.error("❌ Step 6: Failed to parse ranking response:", error);
+          throw new Error("Invalid ranking response format");
+        }
+
+        console.log("📊 Step 6: Validated ranking results:", rankingResults);
+
+        const topClips = rankingResults
           .slice(0, input.topK)
-          .map((index) => clipsForRanking[index])
+          .map((result) => clipsForRanking[result.clipIndex])
           .filter(
             (clip): clip is NonNullable<typeof clip> =>
               clip !== null && clip !== undefined,
@@ -500,7 +582,13 @@ export const searchRouter = createTRPCRouter({
               clip.startTime,
               clip.endTime,
             );
-            const wordsText = words.map((w) => w.word).join(" ");
+
+            // Convert to structured word input format
+            const wordsInput: SeekingWordInput = words.map((word, index) => ({
+              w: word.word,
+              i: index,
+            }));
+
             console.log(
               `📝 Step 7.${i + 1}: Extracted`,
               words.length,
@@ -512,7 +600,7 @@ export const searchRouter = createTRPCRouter({
               query: input.query,
               clipTitle: clip.videoTitle,
               timestamp: clip.timestampReadable,
-              transcriptWords: wordsText,
+              transcriptWords: JSON.stringify(wordsInput, null, 2),
               duration: clip.duration.toString(),
               topic: clip.transcriptText.slice(0, 100),
             });
@@ -521,7 +609,7 @@ export const searchRouter = createTRPCRouter({
               `🤖 Step 7.${i + 1}: Calling GPT-4 for precise seeking...`,
             );
             const seekCompletion = await openai.chat.completions.create({
-              model: "gpt-4",
+              model: "gpt-4o",
               messages: [
                 {
                   role: "system",
@@ -535,6 +623,30 @@ export const searchRouter = createTRPCRouter({
               ],
               temperature: 0.3,
               max_tokens: 200,
+              response_format: {
+                type: "json_schema",
+                json_schema: {
+                  name: "seeking_response",
+                  strict: true,
+                  schema: {
+                    type: "object",
+                    properties: {
+                      start_index: {
+                        type: "integer",
+                        description:
+                          "Index of the word where the answer begins (0-based)",
+                      },
+                      reasoning: {
+                        type: "string",
+                        description:
+                          "Explanation of why this starting point was chosen",
+                      },
+                    },
+                    required: ["start_index", "reasoning"],
+                    additionalProperties: false,
+                  },
+                },
+              },
             });
 
             const seekResponse = seekCompletion.choices[0]?.message?.content;
@@ -558,13 +670,19 @@ export const searchRouter = createTRPCRouter({
             );
 
             console.log(`📊 Step 7.${i + 1}: Seeking response:`, seekResponse);
-            const seekResult = JSON.parse(seekResponse) as {
-              start_index: number;
-              confidence: number;
-              reasoning: string;
-              context_needed: boolean;
-              key_phrase: string;
-            };
+
+            // Parse and validate seeking response
+            let seekResult: SeekingOutput;
+            try {
+              const parsedResponse = JSON.parse(seekResponse);
+              seekResult = SeekingOutputSchema.parse(parsedResponse);
+            } catch (error) {
+              console.error(
+                `❌ Step 7.${i + 1}: Failed to parse seeking response:`,
+                error,
+              );
+              throw new Error("Invalid seeking response format");
+            }
 
             // Calculate precise start time from word index
             let preciseStartTime = clip.startTime;
@@ -580,10 +698,21 @@ export const searchRouter = createTRPCRouter({
               `⏰ Step 7.${i + 1}: Original start: ${clip.startTime}s, Precise start: ${preciseStartTime}s (word index: ${seekResult.start_index})`,
             );
 
+            // Extract updated transcript text from precise start time to end time
+            const updatedTranscriptText = getClipTranscriptByTimestamp(
+              { segments: transcriptSegments },
+              preciseStartTime,
+              clip.endTime,
+            );
+
+            console.log(
+              `📝 Step 7.${i + 1}: Updated transcript from ${preciseStartTime}s: "${updatedTranscriptText.slice(0, 100)}..."`,
+            );
+
             // Create final segment
             finalSegments.push({
               id: clip.clip_id,
-              score: seekResult.confidence,
+              score: clip.similarityScore, // Use original similarity score since confidence was removed
               youtubeId: clip.youtubeId,
               videoTitle: clip.videoTitle,
               segmentId: clip.segmentId,
@@ -602,13 +731,13 @@ export const searchRouter = createTRPCRouter({
               )
                 .toString()
                 .padStart(2, "0")}`,
-              transcriptText: clip.transcriptText,
+              transcriptText: updatedTranscriptText,
               primaryEmotion: clip.primaryEmotion,
               emotionScore: clip.emotionScore,
             });
 
             console.log(
-              `✅ Step 7.${i + 1}: Successfully processed clip with confidence ${seekResult.confidence}`,
+              `✅ Step 7.${i + 1}: Successfully processed clip with reasoning: ${seekResult.reasoning}`,
             );
           } catch (error) {
             console.error(

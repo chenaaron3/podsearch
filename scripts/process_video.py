@@ -310,7 +310,7 @@ class VideoProcessor:
                     existing_segments = json.load(f)
                 
                 # Validate segments have required fields
-                if existing_segments and all(key in existing_segments[0] for key in ["segment_id", "start_time", "end_time", "text"]):
+                if existing_segments and all(key in existing_segments[0] for key in ["segment_id", "start_time", "end_time", "text", "source_segments"]):
                     print(f"✅ Segments loaded: {len(existing_segments)} segments")
                     return existing_segments
                 else:
@@ -330,6 +330,7 @@ class VideoProcessor:
             "start_time": segments[0]["start"],
             "end_time": segments[0]["end"],
             "text": segments[0]["text"],
+            "source_segments": [segments[0]['id']]  # Track the first segment
         }
         
         for i, segment in enumerate(segments[1:], 1):
@@ -365,11 +366,13 @@ class VideoProcessor:
                     "start_time": segment["start"],
                     "end_time": segment["end"],
                     "text": segment["text"],
+                    "source_segments": [segment['id']]  # Track the new segment
                 }
             else:
                 # Extend current segment
                 current_segment["end_time"] = segment["end"]
                 current_segment["text"] += " " + segment["text"]
+                current_segment["source_segments"].append(segment['id'])  # Add to source segments
         
         # Add the last segment
         if current_segment["text"]:
@@ -386,7 +389,8 @@ class VideoProcessor:
                 "end_time": seg["end_time"],
                 "duration": seg["end_time"] - seg["start_time"],
                 "text": seg["text"].strip(),
-                "timestamp_readable": f"{int(seg['start_time']//60):02d}:{int(seg['start_time']%60):02d} - {int(seg['end_time']//60):02d}:{int(seg['end_time']%60):02d}"
+                "timestamp_readable": f"{int(seg['start_time']//60):02d}:{int(seg['start_time']%60):02d} - {int(seg['end_time']//60):02d}:{int(seg['end_time']%60):02d}",
+                "source_segments": [str(int(x)) for x in seg["source_segments"]]
             }
             processed_segments.append(processed_segment)
         
@@ -633,6 +637,7 @@ class VideoProcessor:
                     "timestamp_readable": segment["timestamp_readable"],
                     "primary_emotion": segment["primary_emotion"],
                     "primary_emotion_score": float(segment["primary_emotion_score"]),
+                    "source_segments": segment['source_segments']
                 }
                     
                 vector: PineconeVector = {

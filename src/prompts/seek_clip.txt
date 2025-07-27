@@ -22,10 +22,7 @@ You are a precise content locator for podcast clips. Your task is to identify th
 ```json
 {
   "start_index": 127,
-  "confidence": 0.92,
-  "reasoning": "Starts with 'The key to managing finances is...' which directly addresses the query",
-  "context_needed": false,
-  "key_phrase": "The key to managing finances is budgeting first"
+  "reasoning": "Starts with 'The key to managing finances is...' which directly addresses the query"
 }
 ```
 
