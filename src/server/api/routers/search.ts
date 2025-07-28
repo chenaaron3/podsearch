@@ -5,7 +5,7 @@ import { join } from 'path';
 import { z } from 'zod';
 import { env } from '~/env';
 import { createTRPCRouter, publicProcedure } from '~/server/api/trpc';
-import { transcripts, videos } from '~/server/db/schema';
+import { searchExecutions, transcripts, videos } from '~/server/db/schema';
 
 import { Pinecone } from '@pinecone-database/pinecone';
 
@@ -252,6 +252,47 @@ function savePromptResponse(
     console.log(`📝 Saved prompt/response to: ${filepath}`);
   } catch (error) {
     console.error("❌ Error saving prompt/response:", error);
+  }
+}
+
+// Helper function to log search executions to database
+async function logSearchExecution(
+  ctx: any,
+  query: string,
+  videoId: number | undefined,
+  topK: number,
+  inputClipsCount: number,
+  outputSegmentsCount: number,
+  inputClipsMetadata: any[],
+  outputSegmentsMetadata: any[],
+  processingTimeMs: number,
+  status: "success" | "error",
+  errorMessage?: string,
+): Promise<void> {
+  try {
+    // Get user info from session if available
+    const userId = ctx.session?.user?.id;
+
+    await ctx.db.insert(searchExecutions).values({
+      userId,
+      query,
+      videoId,
+      topK,
+      inputClipsCount,
+      outputSegmentsCount,
+      inputClipsMetadata,
+      outputSegmentsMetadata,
+      processingTimeMs,
+      status,
+      errorMessage,
+    });
+
+    console.log(
+      `📊 Logged search execution: "${query}" (${processingTimeMs}ms, ${outputSegmentsCount} results, status: ${status})`,
+    );
+  } catch (error) {
+    console.error("❌ Failed to log search execution:", error);
+    // Don't throw - logging failure shouldn't break the search
   }
 }
 
@@ -659,6 +700,9 @@ export const searchRouter = createTRPCRouter({
       }),
     )
     .query(async ({ input, ctx }) => {
+      const startTime = Date.now();
+      let errorMessage: string | undefined;
+
       try {
         console.log(
           `🔍 Search started for query: "${input.query}"${input.videoId ? ` in video ID: ${input.videoId}` : ""}`,
@@ -808,9 +852,61 @@ export const searchRouter = createTRPCRouter({
           };
         }
 
+        const processingTimeMs = Date.now() - startTime;
+
+        // Prepare metadata for logging
+        const inputClipsMetadata = clipsForRanking.map((clip) => ({
+          videoTitle: clip.videoTitle,
+          startTime: clip.startTime,
+          endTime: clip.endTime,
+          transcriptText: clip.transcriptText.slice(0, 200), // Truncate for storage
+          similarityScore: clip.similarityScore,
+        }));
+
+        const outputSegmentsMetadata = finalSegments.map((segment) => ({
+          videoTitle: segment.videoTitle,
+          startTime: segment.startTime,
+          endTime: segment.endTime,
+          transcriptText: segment.transcriptText.slice(0, 200), // Truncate for storage
+          score: segment.score,
+        }));
+
+        // Log successful search execution
+        await logSearchExecution(
+          ctx,
+          input.query,
+          input.videoId,
+          input.topK,
+          clipsForRanking.length,
+          finalSegments.length,
+          inputClipsMetadata,
+          outputSegmentsMetadata,
+          processingTimeMs,
+          "success",
+        );
+
         return response;
       } catch (error) {
+        const processingTimeMs = Date.now() - startTime;
+        errorMessage = error instanceof Error ? error.message : "Unknown error";
+
         console.error("💥 Search failed with error:", error);
+
+        // Log failed search execution
+        await logSearchExecution(
+          ctx,
+          input.query,
+          input.videoId,
+          input.topK,
+          0, // No input clips processed
+          0, // No output segments
+          [], // No input metadata
+          [], // No output metadata
+          processingTimeMs,
+          "error",
+          errorMessage,
+        );
+
         throw new Error("Failed to perform search");
       }
     }),

@@ -1,5 +1,5 @@
-import { relations, sql } from "drizzle-orm";
-import { index, pgTableCreator, primaryKey } from "drizzle-orm/pg-core";
+import { relations, sql } from 'drizzle-orm';
+import { index, pgEnum, pgTableCreator, primaryKey } from 'drizzle-orm/pg-core';
 
 import type { AdapterAccount } from "next-auth/adapters";
 /**
@@ -211,3 +211,47 @@ export const transcriptsRelations = relations(transcripts, ({ one }) => ({
     references: [videos.transcriptId],
   }),
 }));
+
+// Search execution logging table with 30-day TTL
+export const searchExecutions = createTable(
+  "search_execution",
+  (d) => ({
+    id: d.integer().primaryKey().generatedByDefaultAsIdentity(),
+    userId: d
+      .varchar({ length: 255 })
+      .references(() => users.id, { onDelete: "set null" }),
+    query: d.varchar({ length: 500 }).notNull(),
+    videoId: d.integer().references(() => videos.id, { onDelete: "set null" }),
+    topK: d.integer().default(5),
+    inputClipsCount: d.integer().default(0),
+    outputSegmentsCount: d.integer().default(0),
+    inputClipsMetadata: d.jsonb(), // Array of clip metadata objects
+    outputSegmentsMetadata: d.jsonb(), // Array of segment metadata objects
+    processingTimeMs: d.integer(),
+    status: d.varchar({ length: 20 }).default("success"), // 'success' | 'error'
+    errorMessage: d.text(),
+    createdAt: d
+      .timestamp({ withTimezone: true })
+      .default(sql`CURRENT_TIMESTAMP`)
+      .notNull(),
+  }),
+  (t) => [
+    index("search_execution_video_id_idx").on(t.videoId),
+    index("search_execution_created_at_idx").on(t.createdAt),
+    index("search_execution_status_idx").on(t.status),
+  ],
+);
+
+export const searchExecutionsRelations = relations(
+  searchExecutions,
+  ({ one }) => ({
+    user: one(users, {
+      fields: [searchExecutions.userId],
+      references: [users.id],
+    }),
+    video: one(videos, {
+      fields: [searchExecutions.videoId],
+      references: [videos.id],
+    }),
+  }),
+);
