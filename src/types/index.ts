@@ -123,3 +123,28 @@ export interface YouTubeEvent {
 
 // YouTube refs type
 export type YouTubeRefs = Record<string, YouTubePlayer>;
+
+// Import the tRPC context type
+import type { inferAsyncReturnType } from "@trpc/server";
+import type { createTRPCContext } from "~/server/api/trpc";
+
+// tRPC Context type for search operations
+export type TRPCContext = inferAsyncReturnType<typeof createTRPCContext>;
+
+// Input clips metadata type for search logging
+export interface InputClipMetadata {
+  videoTitle: string;
+  startTime: number;
+  endTime: number;
+  transcriptText: string;
+  similarityScore: number;
+}
+
+// Output segments metadata type for search logging
+export interface OutputSegmentMetadata {
+  videoTitle: string;
+  startTime: number;
+  endTime: number;
+  transcriptText: string;
+  score: number;
+}

@@ -7,13 +7,13 @@
  * need to use are documented accordingly near the end.
  */
 
-import { getServerSession } from "next-auth";
-import superjson from "superjson";
-import { ZodError } from "zod";
-import { authConfig } from "~/server/auth/config";
-import { db } from "~/server/db";
+import { getServerSession } from 'next-auth';
+import superjson from 'superjson';
+import { ZodError } from 'zod';
+import { authConfig } from '~/server/auth/config';
+import { db } from '~/server/db';
 
-import { initTRPC, TRPCError } from "@trpc/server";
+import { initTRPC, TRPCError } from '@trpc/server';
 
 import type { CreateNextContextOptions } from "@trpc/server/adapters/next";
 

@@ -15,6 +15,9 @@ import type {
   WordTimestamp,
   PineconeSearchQuery,
   SearchResponse,
+  TRPCContext,
+  InputClipMetadata,
+  OutputSegmentMetadata,
 } from "~/types";
 
 // Initialize clients
@@ -257,14 +260,14 @@ function savePromptResponse(
 
 // Helper function to log search executions to database
 async function logSearchExecution(
-  ctx: any,
+  ctx: TRPCContext,
   query: string,
   videoId: number | undefined,
   topK: number,
   inputClipsCount: number,
   outputSegmentsCount: number,
-  inputClipsMetadata: any[],
-  outputSegmentsMetadata: any[],
+  inputClipsMetadata: InputClipMetadata[],
+  outputSegmentsMetadata: OutputSegmentMetadata[],
   processingTimeMs: number,
   status: "success" | "error",
   errorMessage?: string,
@@ -273,6 +276,7 @@ async function logSearchExecution(
     // Get user info from session if available
     const userId = ctx.session?.user?.id;
 
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     await ctx.db.insert(searchExecutions).values({
       userId,
       query,
