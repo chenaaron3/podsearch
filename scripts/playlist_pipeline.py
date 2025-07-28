@@ -15,7 +15,6 @@ Usage:
 
 import sys
 import argparse
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
