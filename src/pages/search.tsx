@@ -159,8 +159,8 @@ export default function Search() {
     };
 
     const getYouTubePlayerOptions = (videoGroup: VideoGroup) => ({
-        height: '315',
-        width: '560',
+        height: '100%',
+        width: '100%',
         playerVars: {
             start: Math.floor(videoGroup.clips[0]?.startTime ?? 0),
             autoplay: 0,
@@ -246,25 +246,26 @@ export default function Search() {
             <Head>
                 <title>Diary of a CEO Search</title>
                 <meta name="description" content="Search through Diary of a CEO podcast episodes" />
+                <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
                 <link rel="icon" href="/favicon.ico" />
             </Head>
 
             <main className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100 dark:from-slate-900 dark:via-slate-800 dark:to-slate-900">
-                <div className="container mx-auto px-4 py-8">
+                <div className="container mx-auto px-4 sm:px-6 py-4 sm:py-8">
                     {/* Header */}
-                    <div className="text-center mb-12">
-                        <h1 className="text-4xl font-bold text-foreground mb-4 flex items-center justify-center gap-3">
-                            <SearchIcon className="h-10 w-10 text-primary" />
-                            Diary of a CEO Search
+                    <div className="text-center mb-8 sm:mb-12">
+                        <h1 className="text-2xl sm:text-3xl md:text-4xl font-bold text-foreground mb-3 sm:mb-4 flex items-center justify-center gap-2 sm:gap-3">
+                            <SearchIcon className="h-6 w-6 sm:h-8 sm:w-8 md:h-10 md:w-10 text-primary" />
+                            <span className="leading-tight">Diary of a CEO Search</span>
                         </h1>
-                        <p className="text-muted-foreground text-lg max-w-2xl mx-auto">
+                        <p className="text-muted-foreground text-sm sm:text-base md:text-lg max-w-2xl mx-auto px-2">
                             Discover the most relevant insights from Steven Bartlett&apos;s podcast episodes with AI-powered search
                         </p>
                     </div>
 
                     {/* Persistent Search Bar - Show when in results phase */}
                     {currentPhase === "results" && (
-                        <div className="max-w-2xl mx-auto mb-8">
+                        <div className="max-w-2xl mx-auto mb-6 sm:mb-8 px-2">
                             <SearchBar
                                 value={searchQuery}
                                 onChange={setSearchQuery}
@@ -290,9 +291,9 @@ export default function Search() {
 
                     {/* Results Phase */}
                     {currentPhase === "results" && (
-                        <div className="space-y-8">
+                        <div className="space-y-6 sm:space-y-8">
                             {/* Video Groups */}
-                            <div className="space-y-8 max-w-7xl mx-auto">
+                            <div className="space-y-6 sm:space-y-8 max-w-7xl mx-auto">
                                 {videoGroups.map((videoGroup) => {
                                     const selectedClipIndex = selectedClips[videoGroup.youtubeId] ?? 0;
                                     const selectedClip = videoGroup.clips[selectedClipIndex];
@@ -304,21 +305,22 @@ export default function Search() {
 
                                     return (
                                         <Card key={videoGroup.youtubeId} className="shadow-lg border-0 bg-white/90 dark:bg-slate-800/90 backdrop-blur-sm">
-                                            <CardHeader>
+                                            <CardHeader className="pb-4 sm:pb-6">
                                                 <div className="flex items-start justify-between">
                                                     <div className="flex-1">
-                                                        <CardTitle className="text-xl mb-2 line-clamp-2">
+                                                        <CardTitle className="text-lg sm:text-xl mb-2 line-clamp-2 leading-tight">
                                                             {videoGroup.videoTitle}
                                                         </CardTitle>
                                                     </div>
                                                 </div>
                                             </CardHeader>
-                                            <CardContent>
-                                                <div className="grid lg:grid-cols-2 gap-8">
+                                            <CardContent className="space-y-6 sm:space-y-8">
+                                                {/* Video Player and Clip Content - Stacked on mobile, side-by-side on desktop */}
+                                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8">
                                                     {/* Video Player */}
                                                     <div className="space-y-4 flex flex-col justify-center items-center">
                                                         <div
-                                                            className="aspect-video rounded-lg overflow-hidden bg-black relative shadow-lg"
+                                                            className="aspect-video rounded-lg overflow-hidden bg-black relative shadow-lg w-full max-w-full"
                                                             onTouchStart={onTouchStart}
                                                             onTouchMove={onTouchMove}
                                                             onTouchEnd={() => onTouchEnd(videoGroup.youtubeId, selectedClipIndex, videoGroup.clips.length)}
@@ -345,14 +347,19 @@ export default function Search() {
                                                     </div>
 
                                                     {/* Clip Navigation and Details */}
-                                                    <div className="space-y-3">
-                                                        {/* Clip Tabs */}
+                                                    <div className="space-y-4 sm:space-y-6">
+                                                        {/* Clip Tabs - Responsive grid */}
                                                         <div className="space-y-4">
                                                             <Tabs value={selectedClipIndex.toString()} onValueChange={(value) => handleClipSelect(videoGroup.youtubeId, parseInt(value))}>
-                                                                <TabsList className="grid w-full grid-cols-2 lg:grid-cols-3 border">
+                                                                <TabsList className="grid w-full grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 border h-auto">
                                                                     {videoGroup.clips.map((clip, index) => (
-                                                                        <TabsTrigger key={clip.id} value={index.toString()} className="text-xs data-[state=inactive]:bg-muted/50 data-[state=inactive]:border data-[state=inactive]:border-border">
-                                                                            Clip {index + 1}
+                                                                        <TabsTrigger
+                                                                            key={clip.id}
+                                                                            value={index.toString()}
+                                                                            className="text-xs sm:text-sm py-2 sm:py-3 data-[state=inactive]:bg-muted/50 data-[state=inactive]:border data-[state=inactive]:border-border whitespace-nowrap"
+                                                                        >
+                                                                            <span className="hidden sm:inline">Clip {index + 1}</span>
+                                                                            <span className="sm:hidden">C{index + 1}</span>
                                                                             <span className="ml-1 opacity-75">
                                                                                 ({formatTime(clip.startTime)})
                                                                             </span>
@@ -361,9 +368,10 @@ export default function Search() {
                                                                 </TabsList>
                                                             </Tabs>
                                                         </div>
+
                                                         {/* Selected Clip Details */}
                                                         <div className="space-y-4">
-                                                            <div className="bg-muted/50 rounded-lg p-4 text-sm leading-relaxed">
+                                                            <div className="bg-muted/50 rounded-lg p-3 sm:p-4 text-sm leading-relaxed">
                                                                 {selectedClip.transcriptText}
                                                             </div>
                                                         </div>
