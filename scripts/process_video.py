@@ -705,29 +705,7 @@ class VideoProcessor:
             segments_with_embeddings = self.generate_embeddings(video, segments_with_emotions, force_reprocess)
             
             # Step 6: Store in Pinecone
-            self.store_in_pinecone(video, segments_with_embeddings)
-            
-            # Save similarity analysis
-            analysis_file = self.output_dir / f"{video.title}_analysis.json"
-            analysis_data = {
-                "video_id": video_id,
-                "total_segments": len(segments),
-                "average_segment_duration": np.mean([seg["duration"] for seg in segments]),
-                "emotion_analysis_enabled": self.enable_emotion_analysis,
-                "processed_at": datetime.now().isoformat()
-            }
-            
-            # Add emotion analysis summary if available
-            if segments_with_emotions and "primary_emotion" in segments_with_emotions[0]:
-                primary_emotions = [seg["primary_emotion"] for seg in segments_with_emotions]
-                emotion_counts = {}
-                for emotion in primary_emotions:
-                    emotion_counts[emotion] = emotion_counts.get(emotion, 0) + 1
-                analysis_data["emotion_distribution"] = emotion_counts
-                analysis_data["most_common_emotion"] = max(emotion_counts.items(), key=lambda x: x[1])[0]
-            
-            with open(analysis_file, "w", encoding="utf-8") as f:
-                json.dump(analysis_data, f, indent=2)
+            self.store_in_pinecone(video, segments_with_embeddings)        
             
             self.db_manager.update_video_status(video.id, VideoStatus.FINISHED)
             print(f"✅ Successfully processed video {video_id}")
