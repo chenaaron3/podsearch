@@ -159,7 +159,7 @@ export default async function handler(
 
     // Find the first English track (prefer auto-generated)
     const englishTrack = tracks.find((track: TranscriptTrack) =>
-      track.language?.toLowerCase().includes("english"),
+      track.language?.toLowerCase().includes("en"),
     );
 
     if (!englishTrack?.transcript) {
