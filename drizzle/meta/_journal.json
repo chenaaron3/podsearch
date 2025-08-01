@@ -15,6 +15,13 @@
       "when": 1753666439988,
       "tag": "0001_stale_doctor_doom",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1754020068077,
+      "tag": "0002_big_gwen_stacy",
+      "breakpoints": true
     }
   ]
 }

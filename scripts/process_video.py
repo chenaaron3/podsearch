@@ -61,7 +61,9 @@ class VideoProcessor:
                  pinecone_index_name: str = "video-segments",
                  embedding_type: str = "openai",
                  local_model_name: str = "all-MiniLM-L6-v2",
-                 enable_emotion_analysis: bool = True):
+                 enable_emotion_analysis: bool = True,
+                 skip_initialization: bool = False,
+                 ):
         """
         Initialize the video processor.
         
@@ -85,6 +87,9 @@ class VideoProcessor:
         
         # Initialize database manager
         self.db_manager = DatabaseManager()
+
+        if skip_initialization:
+            return
         
         # Initialize models and clients
         print("🔄 Loading Whisper model...")
@@ -143,8 +148,6 @@ class VideoProcessor:
         self.similarity_threshold = 0.85   # Threshold for grouping similar segments
         
         self._setup_pinecone_index()
-
-
 
     def _setup_pinecone_index(self):
         """Set up Pinecone index for storing embeddings."""

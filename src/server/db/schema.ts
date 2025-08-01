@@ -255,3 +255,34 @@ export const searchExecutionsRelations = relations(
     }),
   }),
 );
+
+// API usage tracking table for transcript requests
+export const transcriptRequests = createTable(
+  "transcript_request",
+  (d) => ({
+    id: d.integer().primaryKey().generatedByDefaultAsIdentity(),
+    youtubeId: d.varchar({ length: 255 }).notNull(),
+    timestamp: d.integer().notNull(), // timestamp in seconds
+    duration: d.integer().notNull(), // duration in seconds
+    transcriptText: d.text(), // the returned transcript text
+    success: d.boolean().default(true), // whether the request was successful
+    errorMessage: d.text(), // error message if failed
+    processingTimeMs: d.integer(), // time taken to process the request
+    createdAt: d
+      .timestamp({ withTimezone: true })
+      .default(sql`CURRENT_TIMESTAMP`)
+      .notNull(),
+  }),
+  (t) => [
+    index("transcript_request_youtube_id_idx").on(t.youtubeId),
+    index("transcript_request_created_at_idx").on(t.createdAt),
+    index("transcript_request_success_idx").on(t.success),
+  ],
+);
+
+export const transcriptRequestsRelations = relations(
+  transcriptRequests,
+  ({ one }) => ({
+    // No direct relations needed for this tracking table
+  }),
+);

@@ -337,13 +337,16 @@ class DatabaseManager:
                 
                 session.commit()
     
-    def get_videos_by_status(self, status: str, playlist_id: int = None) -> List[Video]:
+    def get_videos_by_status(self, status: str, playlist_id: int = None, limit: int = None) -> List[Video]:
         """Get videos by status, optionally filtered by playlist."""
         with self.get_session() as session:
             query = session.query(Video).filter(Video.status == status)
             if playlist_id:
                 query = query.filter(Video.playlist_id == playlist_id)
-            return query.order_by(Video.published_at.desc()).all()
+            query =  query.order_by(Video.published_at.desc())
+            if limit:
+                query = query.limit(limit)
+            return query.all()
     
     def get_pending_videos(self, playlist_id: int = None) -> List[Video]:
         """Get videos ready for processing."""
