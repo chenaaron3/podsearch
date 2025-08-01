@@ -232,23 +232,9 @@ export default async function handler(
       `✅ Successfully extracted transcript: "${transcriptText.slice(0, 100)}..."`,
     );
 
-    // Return the transcript
-    res.status(200).json({
-      transcript: transcriptText,
-    });
-  } catch (error) {
-    success = false;
-    errorMessage = error instanceof Error ? error.message : "Unknown error";
-    console.error("❌ Transcript fetch failed:", error);
-
-    // Return empty transcript on error
-    res.status(200).json({
-      transcript: "",
-    });
-  } finally {
     const processingTimeMs = Date.now() - startTime;
 
-    // Log the request to database
+    // Log the request to database before sending response
     try {
       await db.insert(transcriptRequests).values({
         youtubeId: youtubeIdStr,
@@ -267,5 +253,41 @@ export default async function handler(
       console.error("❌ Failed to log transcript request:", logError);
       // Don't throw - logging failure shouldn't break the API response
     }
+
+    // Return the transcript after database logging
+    res.status(200).json({
+      transcript: transcriptText,
+    });
+  } catch (error) {
+    success = false;
+    errorMessage = error instanceof Error ? error.message : "Unknown error";
+    console.error("❌ Transcript fetch failed:", error);
+
+    const processingTimeMs = Date.now() - startTime;
+
+    // Log the error to database before sending response
+    try {
+      await db.insert(transcriptRequests).values({
+        youtubeId: youtubeIdStr,
+        timestamp: timestampNum,
+        duration: durationNum,
+        transcriptText: transcriptText,
+        success,
+        errorMessage,
+        processingTimeMs,
+      });
+
+      console.log(
+        `📊 Logged transcript request error: ${youtubeIdStr} (${processingTimeMs}ms, success: ${success})`,
+      );
+    } catch (logError) {
+      console.error("❌ Failed to log transcript request:", logError);
+      // Don't throw - logging failure shouldn't break the API response
+    }
+
+    // Return empty transcript on error after database logging
+    res.status(200).json({
+      transcript: "",
+    });
   }
 }
