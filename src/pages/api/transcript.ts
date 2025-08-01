@@ -176,7 +176,7 @@ export default async function handler(
 
     // Calculate the time range
     const startTimeSeconds = Math.max(0, timestampNum - durationNum);
-    const endTimeSeconds = timestampNum;
+    const endTimeSeconds = timestampNum + 5;
 
     console.log(
       `⏰ Extracting transcript from ${startTimeSeconds}s to ${endTimeSeconds}s`,
