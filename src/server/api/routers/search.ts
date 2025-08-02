@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { env } from '~/env';
 import { createTRPCRouter, publicProcedure } from '~/server/api/trpc';
 import { searchExecutions, transcripts, videos } from '~/server/db/schema';
+import { RANK_PROMPT, replacePromptPlaceholders, SEEK_PROMPT } from '~/utils/llm';
 
 import { Pinecone } from '@pinecone-database/pinecone';
 
@@ -19,7 +20,6 @@ import type {
   InputClipMetadata,
   OutputSegmentMetadata,
 } from "~/types";
-
 // Initialize clients
 const pinecone = new Pinecone({
   apiKey: env.PINECONE_API_KEY,
@@ -32,17 +32,6 @@ const openai = new OpenAI({
 const OPENAI_REASONING_MODEL = "gpt-4o-mini";
 const OPENAI_MODEL = "gpt-4.1-mini";
 const PINECONE_INDEX_NAME = "video-segments";
-
-// Load prompts at build time
-const RANK_PROMPT = readFileSync(
-  join(process.cwd(), "src", "prompts", "rank_relevance.txt"),
-  "utf-8",
-);
-const SEEK_PROMPT = readFileSync(
-  join(process.cwd(), "src", "prompts", "seek_clip.txt"),
-  "utf-8",
-);
-
 // Types for Pinecone metadata
 interface PineconeMetadata {
   video_id: number;
@@ -209,21 +198,6 @@ function getClipTranscriptByTimestamp(
     endTime,
   );
   return joinTranscriptSegments(segments);
-}
-
-// Helper function to replace placeholders in prompts
-function replacePromptPlaceholders(
-  prompt: string,
-  replacements: Record<string, string>,
-): string {
-  let result = prompt;
-  for (const [placeholder, value] of Object.entries(replacements)) {
-    result = result.replace(
-      new RegExp(`\\{\\{${placeholder}\\}\\}`, "g"),
-      value,
-    );
-  }
-  return result;
 }
 
 // Helper function to save prompts and responses to filesystem
