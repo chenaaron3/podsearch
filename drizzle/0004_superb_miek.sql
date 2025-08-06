@@ -1,0 +1,1 @@
+CREATE INDEX "chapter_similarity_unique_idx" ON "podsearch_chapter_similarity" USING btree ("sourceChapterId","destChapterId");

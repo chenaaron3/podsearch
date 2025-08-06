@@ -9,7 +9,8 @@ import json
 import time
 from datetime import datetime
 from typing import Optional, List, Dict, Any, TypedDict
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Index, Boolean, Float
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Index, Boolean, Float, text
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 from sqlalchemy.sql import func
@@ -57,6 +58,11 @@ class SegmentWithEmbedding(SegmentWithEmotion):
     embedding_model: str
     embedding_type: str
     embedding_dimensions: int
+
+class ChapterSimilarityData(TypedDict):
+    source_chapter_id: int
+    dest_chapter_id: int
+    similarity_score: float
 
 class PineconeMetadata(TypedDict):
     video_id: int
@@ -157,6 +163,7 @@ class Video(Base):
     # Relationships
     playlist = relationship("Playlist", back_populates="videos")
     transcript = relationship("Transcript", back_populates="video", uselist=False)
+    chapters = relationship("Chapter", back_populates="video", cascade="all, delete-orphan")
     
     # Indexes
     __table_args__ = (
@@ -165,6 +172,51 @@ class Video(Base):
         Index("video_transcript_id_idx", "transcriptId"),
         Index("video_status_idx", "status"),
         Index("video_published_at_idx", "publishedAt"),
+    )
+
+class Chapter(Base):
+    __tablename__ = "podsearch_chapter"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    video_id = Column("videoId", Integer, ForeignKey("podsearch_video.id", ondelete="CASCADE"), nullable=False)
+    chapter_idx = Column("chapterIdx", Integer, nullable=False)  # YouTube chapter index
+    chapter_name = Column("chapterName", String(500), nullable=False)
+    chapter_summary = Column("chapterSummary", Text, nullable=False)  # LLM-generated summary
+    start_time = Column("startTime", Integer, nullable=False)  # start time in seconds
+    end_time = Column("endTime", Integer, nullable=False)  # end time in seconds
+    created_at = Column("createdAt", DateTime(timezone=True), default=func.now(), nullable=False)
+    updated_at = Column("updatedAt", DateTime(timezone=True), onupdate=func.now())
+    
+    # Relationships
+    video = relationship("Video", back_populates="chapters")
+    source_similarities = relationship("ChapterSimilarity", foreign_keys="ChapterSimilarity.source_chapter_id", back_populates="source_chapter")
+    dest_similarities = relationship("ChapterSimilarity", foreign_keys="ChapterSimilarity.dest_chapter_id", back_populates="dest_chapter")
+    
+    # Indexes
+    __table_args__ = (
+        Index("chapter_video_id_idx", "videoId"),
+        Index("chapter_video_idx_idx", "videoId", "chapterIdx"),  # Unique constraint
+    )
+
+class ChapterSimilarity(Base):
+    __tablename__ = "podsearch_chapter_similarity"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_chapter_id = Column("sourceChapterId", Integer, ForeignKey("podsearch_chapter.id", ondelete="CASCADE"), nullable=False)
+    dest_chapter_id = Column("destChapterId", Integer, ForeignKey("podsearch_chapter.id", ondelete="CASCADE"), nullable=False)
+    similarity_score = Column("similarityScore", Float, nullable=False)  # Pinecone similarity score
+    created_at = Column("createdAt", DateTime(timezone=True), default=func.now(), nullable=False)
+    
+    # Relationships
+    source_chapter = relationship("Chapter", foreign_keys=[source_chapter_id], back_populates="source_similarities")
+    dest_chapter = relationship("Chapter", foreign_keys=[dest_chapter_id], back_populates="dest_similarities")
+    
+    # Indexes
+    __table_args__ = (
+        Index("chapter_similarity_source_idx", "sourceChapterId"),
+        Index("chapter_similarity_dest_idx", "destChapterId"),
+        Index("chapter_similarity_score_idx", "similarityScore"),
+        Index("chapter_similarity_unique_idx", "sourceChapterId", "destChapterId", unique=True),
     )
 
 class DatabaseManager:
@@ -430,3 +482,163 @@ class DatabaseManager:
         """Get a playlist by its database ID."""
         with self.get_session() as session:
             return session.query(Playlist).filter(Playlist.id == playlist_id).first()
+
+    # Chapter-related methods
+    def get_finished_videos(self, playlist_id: int = None) -> List[Video]:
+        """Get videos with 'finished' status that don't have chapters yet."""
+        with self.get_session() as session:
+            query = session.query(Video).filter(Video.status == VideoStatus.FINISHED)
+            if playlist_id:
+                query = query.filter(Video.playlist_id == playlist_id)
+            query = query.order_by(Video.published_at.desc())
+            return query.all()
+
+    def save_chapter(self, video_id: int, chapter_idx: int, chapter_name: str, 
+                    chapter_summary: str, start_time: int, end_time: int) -> Optional[Chapter]:
+        """Save a chapter to the database."""
+        with self.get_session() as session:
+            # Check if chapter already exists
+            existing = session.query(Chapter).filter(
+                Chapter.video_id == video_id,
+                Chapter.chapter_idx == chapter_idx
+            ).first()
+            
+            if existing:
+                # Update existing chapter
+                existing.chapter_name = chapter_name
+                existing.chapter_summary = chapter_summary
+                existing.start_time = start_time
+                existing.end_time = end_time
+                existing.updated_at = datetime.now()
+                session.commit()
+                return existing
+            else:
+                # Create new chapter
+                chapter = Chapter(
+                    video_id=video_id,
+                    chapter_idx=chapter_idx,
+                    chapter_name=chapter_name,
+                    chapter_summary=chapter_summary,
+                    start_time=start_time,
+                    end_time=end_time
+                )
+                session.add(chapter)
+                session.commit()
+                session.refresh(chapter)
+                return chapter
+
+    def save_chapter_similarity(self, source_chapter_id: int, dest_chapter_id: int, 
+                              similarity_score: float) -> ChapterSimilarity:
+        """Save a chapter similarity relationship."""
+        with self.get_session() as session:
+            # Check if similarity already exists
+            existing = session.query(ChapterSimilarity).filter(
+                ChapterSimilarity.source_chapter_id == source_chapter_id,
+                ChapterSimilarity.dest_chapter_id == dest_chapter_id
+            ).first()
+            
+            if existing:
+                # Update existing similarity
+                existing.similarity_score = similarity_score
+                session.commit()
+                return existing
+            else:
+                # Create new similarity
+                similarity = ChapterSimilarity(
+                    source_chapter_id=source_chapter_id,
+                    dest_chapter_id=dest_chapter_id,
+                    similarity_score=similarity_score
+                )
+                session.add(similarity)
+                session.commit()
+                session.refresh(similarity)
+                return similarity
+
+    def bulk_upsert_chapter_similarities(self, similarities: List[ChapterSimilarityData]) -> int:
+        """
+        Bulk upsert chapter similarities using SQLAlchemy ORM with type safety.
+        Much more efficient than individual queries.
+        
+        Args:
+            similarities: List of dicts with keys: source_chapter_id, dest_chapter_id, similarity_score
+            
+        Returns:
+            Number of rows affected
+        """
+        if not similarities:
+            return 0
+            
+        with self.get_session() as session:
+            # Prepare data for bulk insert using SQLAlchemy model column names
+            values_to_insert = []
+            for sim in similarities:
+                values_to_insert.append({
+                    ChapterSimilarity.source_chapter_id.key: sim['source_chapter_id'],
+                    ChapterSimilarity.dest_chapter_id.key: sim['dest_chapter_id'], 
+                    ChapterSimilarity.similarity_score.key: sim['similarity_score']
+                })
+            
+            # Use SQLAlchemy's PostgreSQL insert with on_conflict_do_update
+            stmt = insert(ChapterSimilarity).values(values_to_insert)
+            stmt = stmt.on_conflict_do_update(
+                constraint='chapter_similarity_unique',
+                set_={
+                    ChapterSimilarity.similarity_score: stmt.excluded.similarityScore,
+                    ChapterSimilarity.created_at: func.now()
+                }
+            )
+            
+            result = session.execute(stmt)
+            session.commit()
+            return result.rowcount
+
+    def get_chapters_by_video_id(self, video_id: int) -> List[Chapter]:
+        """Get all chapters for a video."""
+        with self.get_session() as session:
+            return session.query(Chapter).filter(
+                Chapter.video_id == video_id
+            ).order_by(Chapter.chapter_idx).all()
+
+    def get_chapter_similarities(self, chapter_id: int, limit: int = 5) -> List[ChapterSimilarity]:
+        """Get top similar chapters for a given chapter."""
+        with self.get_session() as session:
+            return session.query(ChapterSimilarity).filter(
+                ChapterSimilarity.source_chapter_id == chapter_id
+            ).order_by(ChapterSimilarity.similarity_score.desc()).limit(limit).all()
+
+    def get_all_chapters_for_embedding(self) -> List[Chapter]:
+        """Get all chapters that need to be embedded (for similarity search)."""
+        with self.get_session() as session:
+            return session.query(Chapter).all()
+
+    def clear_chapter_similarities_for_video(self, video_id: int):
+        """Clear all similarity relationships for chapters in a video."""
+        with self.get_session() as session:
+            # Get all chapter IDs for this video
+            chapter_ids = session.query(Chapter.id).filter(Chapter.video_id == video_id).all()
+            chapter_ids = [c[0] for c in chapter_ids]
+            
+            if chapter_ids:
+                # Delete similarities where source or dest is in this video
+                session.query(ChapterSimilarity).filter(
+                    (ChapterSimilarity.source_chapter_id.in_(chapter_ids)) |
+                    (ChapterSimilarity.dest_chapter_id.in_(chapter_ids))
+                ).delete()
+                session.commit()
+    
+    def get_all_similarities(self) -> List[ChapterSimilarity]:
+        """Get all chapter similarities."""
+        with self.get_session() as session:
+            return session.query(ChapterSimilarity).limit(100).all()
+    
+    def get_chapters_by_ids(self, chapter_ids: List[int]) -> List[Chapter]:
+        """Get chapters by their database IDs."""
+        with self.get_session() as session:
+            return session.query(Chapter).filter(Chapter.id.in_(chapter_ids)).all()
+    
+    def get_videos_with_chapters(self) -> List[Video]:
+        """Get all videos that have chapters."""
+        with self.get_session() as session:
+            # Use a subquery to find videos that have chapters
+            videos_with_chapters = session.query(Video).join(Chapter).distinct().all()
+            return videos_with_chapters

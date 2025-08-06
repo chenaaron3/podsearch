@@ -254,13 +254,7 @@ def get_hooks_from_playlist(playlist_id: str) -> Dict[str, List[Dict[str, any]]]
                     chapter_sentences.append(sentence["text"])
             
             if chapter_sentences:
-                print(f"Found {len(chapter_sentences)} sentences for chapter")
-                # Generate hook from the chapter sentences
-                hook = get_hook_from_transcript(video.youtube_id, chapter, chapter_sentences)
-                if hook:
-                    print(f"🎣 Generated hook: {hook}")
-                else:
-                    print("❌ Failed to generate hook")
+                print(chapter_sentences)
             else:
                 print("⚠️  No sentences found for this chapter")
 

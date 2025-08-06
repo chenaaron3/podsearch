@@ -1,0 +1,21 @@
+# Prompt: Extract Single Evergreen Main Takeaway for Zettelkasten
+
+From the following podcast transcript, extract **one** core, atomic, and evergreen main idea suitable for a standalone Zettelkasten note.
+
+**Instructions:**
+
+- Identify the most important single insight or concept in the text.
+- Write it clearly and concisely in your own words.
+- Avoid common-sense statements and trivial points.
+- Output only **one** polished, standalone statement.
+- Return your response as a JSON object with a "summary" field.
+
+**Transcript:**  
+{{transcript}}
+
+**Response Format:**
+```json
+{
+  "summary": "Your single main takeaway here"
+}
+```

@@ -148,3 +148,60 @@ export interface OutputSegmentMetadata {
   transcriptText: string;
   score: number;
 }
+
+// Chapter types for knowledge graph
+export interface Chapter {
+  id: number;
+  videoId: number;
+  chapterIdx: number;
+  chapterName: string;
+  chapterSummary: string;
+  startTime: number;
+  endTime: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ChapterSimilarity {
+  id: number;
+  sourceChapterId: number;
+  destChapterId: number;
+  similarityScore: number;
+  createdAt: string;
+}
+
+export interface ChapterWithVideo extends Chapter {
+  video: {
+    id: number;
+    youtubeId: string;
+    title: string;
+  };
+}
+
+export interface ChapterSimilarityWithDetails extends ChapterSimilarity {
+  sourceChapter: ChapterWithVideo;
+  destChapter: ChapterWithVideo;
+}
+
+// Graph data types for visualization
+export interface GraphNode {
+  id: string;
+  label: string;
+  videoId: number;
+  videoTitle: string;
+  chapterName: string;
+  chapterSummary: string;
+  startTime: number;
+  endTime: number;
+}
+
+export interface GraphEdge {
+  source: string;
+  target: string;
+  similarityScore: number;
+}
+
+export interface GraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}

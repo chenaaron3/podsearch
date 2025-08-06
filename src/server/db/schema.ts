@@ -1,5 +1,5 @@
 import { relations, sql } from 'drizzle-orm';
-import { index, pgEnum, pgTableCreator, primaryKey } from 'drizzle-orm/pg-core';
+import { index, pgEnum, pgTableCreator, primaryKey, unique } from 'drizzle-orm/pg-core';
 
 import type { AdapterAccount } from "next-auth/adapters";
 /**
@@ -194,7 +194,7 @@ export const playlistsRelations = relations(playlists, ({ many }) => ({
   videos: many(videos),
 }));
 
-export const videosRelations = relations(videos, ({ one }) => ({
+export const videosRelations = relations(videos, ({ one, many }) => ({
   playlist: one(playlists, {
     fields: [videos.playlistId],
     references: [playlists.id],
@@ -203,6 +203,7 @@ export const videosRelations = relations(videos, ({ one }) => ({
     fields: [videos.transcriptId],
     references: [transcripts.id],
   }),
+  chapters: many(chapters),
 }));
 
 export const transcriptsRelations = relations(transcripts, ({ one }) => ({
@@ -284,5 +285,85 @@ export const transcriptRequestsRelations = relations(
   transcriptRequests,
   ({ one }) => ({
     // No direct relations needed for this tracking table
+  }),
+);
+
+// Chapter processing tables for knowledge graph
+export const chapters = createTable(
+  "chapter",
+  (d) => ({
+    id: d.integer().primaryKey().generatedByDefaultAsIdentity(),
+    videoId: d
+      .integer()
+      .notNull()
+      .references(() => videos.id, { onDelete: "cascade" }),
+    chapterIdx: d.integer().notNull(), // YouTube chapter index
+    chapterName: d.varchar({ length: 500 }).notNull(),
+    chapterSummary: d.text().notNull(), // LLM-generated summary
+    startTime: d.integer().notNull(), // start time in seconds
+    endTime: d.integer().notNull(), // end time in seconds
+    createdAt: d
+      .timestamp({ withTimezone: true })
+      .default(sql`CURRENT_TIMESTAMP`)
+      .notNull(),
+    updatedAt: d.timestamp({ withTimezone: true }).$onUpdate(() => new Date()),
+  }),
+  (t) => [
+    index("chapter_video_id_idx").on(t.videoId),
+    index("chapter_video_idx_idx").on(t.videoId, t.chapterIdx), // Unique constraint
+  ],
+);
+
+export const chapterSimilarities = createTable(
+  "chapter_similarity",
+  (d) => ({
+    id: d.integer().primaryKey().generatedByDefaultAsIdentity(),
+    sourceChapterId: d
+      .integer()
+      .notNull()
+      .references(() => chapters.id, { onDelete: "cascade" }),
+    destChapterId: d
+      .integer()
+      .notNull()
+      .references(() => chapters.id, { onDelete: "cascade" }),
+    similarityScore: d.real().notNull(), // Pinecone similarity score
+    createdAt: d
+      .timestamp({ withTimezone: true })
+      .default(sql`CURRENT_TIMESTAMP`)
+      .notNull(),
+  }),
+  (t) => [
+    index("chapter_similarity_source_idx").on(t.sourceChapterId),
+    index("chapter_similarity_dest_idx").on(t.destChapterId),
+    index("chapter_similarity_score_idx").on(t.similarityScore),
+    unique("chapter_similarity_unique").on(t.sourceChapterId, t.destChapterId),
+  ],
+);
+
+// Chapter relations
+export const chaptersRelations = relations(chapters, ({ one, many }) => ({
+  video: one(videos, {
+    fields: [chapters.videoId],
+    references: [videos.id],
+  }),
+  sourceSimilarities: many(chapterSimilarities, {
+    relationName: "sourceChapter",
+  }),
+  destSimilarities: many(chapterSimilarities, { relationName: "destChapter" }),
+}));
+
+export const chapterSimilaritiesRelations = relations(
+  chapterSimilarities,
+  ({ one }) => ({
+    sourceChapter: one(chapters, {
+      fields: [chapterSimilarities.sourceChapterId],
+      references: [chapters.id],
+      relationName: "sourceChapter",
+    }),
+    destChapter: one(chapters, {
+      fields: [chapterSimilarities.destChapterId],
+      references: [chapters.id],
+      relationName: "destChapter",
+    }),
   }),
 );
