@@ -464,7 +464,7 @@ class ChapterProcessor:
         print(f"  🔄 Using {max_workers} parallel workers")
         
         # Process videos in parallel
-        # self._process_videos_parallel(videos, max_workers, "all")
+        self._process_videos_parallel(videos, max_workers, "all")
         
         # Process similarities for all videos
         self.process_similarities()

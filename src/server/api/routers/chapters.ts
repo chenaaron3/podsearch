@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, ne } from 'drizzle-orm';
+import { and, desc, eq, gt, gte, inArray, ne } from 'drizzle-orm';
 import { z } from 'zod';
 import { createTRPCRouter, publicProcedure } from '~/server/api/trpc';
 import { db } from '~/server/db';
@@ -184,7 +184,7 @@ export const chaptersRouter = createTRPCRouter({
     };
   }),
 
-  // Get network visualization data with similarity threshold
+  // Get network visualization data with similarity threshold (limited version)
   getNetworkData: publicProcedure
     .input(
       z.object({
@@ -258,6 +258,7 @@ export const chaptersRouter = createTRPCRouter({
           id: chapter.id.toString(),
           label: chapter.chapterName,
           videoId: chapter.videoId,
+          youtubeId: chapter.videoYoutubeId,
           videoTitle: chapter.videoTitle,
           chapterName: chapter.chapterName,
           chapterSummary: chapter.chapterSummary,
@@ -291,6 +292,183 @@ export const chaptersRouter = createTRPCRouter({
                 ) / edges.length
               : 0,
         },
+      };
+    }),
+
+  // Get complete network visualization data with cursor-based pagination
+  getCompleteNetworkData: publicProcedure
+    .input(
+      z.object({
+        similarityThreshold: z.number().min(0).max(1).default(0.5),
+        videoId: z.number().optional(),
+        batchSize: z.number().min(100).max(5000).default(1000),
+      }),
+    )
+    .query(async ({ input }) => {
+      const allSimilarities: Array<{
+        sourceChapterId: number;
+        destChapterId: number;
+        similarityScore: number;
+      }> = [];
+
+      let lastId = 0;
+      let hasMore = true;
+
+      // Fetch all similarities using cursor-based pagination
+      while (hasMore) {
+        const batch = await db
+          .select({
+            id: chapterSimilarities.id,
+            sourceChapterId: chapterSimilarities.sourceChapterId,
+            destChapterId: chapterSimilarities.destChapterId,
+            similarityScore: chapterSimilarities.similarityScore,
+          })
+          .from(chapterSimilarities)
+          .where(
+            and(
+              gte(
+                chapterSimilarities.similarityScore,
+                input.similarityThreshold,
+              ),
+              ne(
+                chapterSimilarities.sourceChapterId,
+                chapterSimilarities.destChapterId,
+              ), // Exclude self-loops
+              gt(chapterSimilarities.id, lastId),
+            ),
+          )
+          .orderBy(chapterSimilarities.id)
+          .limit(input.batchSize);
+
+        if (batch.length === 0) {
+          hasMore = false;
+        } else {
+          allSimilarities.push(...batch);
+          lastId = batch[batch.length - 1]!.id;
+          hasMore = batch.length === input.batchSize;
+        }
+      }
+
+      // Sort by similarity score (descending) to prioritize stronger connections
+      allSimilarities.sort((a, b) => b.similarityScore - a.similarityScore);
+
+      // Get unique chapter IDs from all similarities
+      const chapterIds = new Set<number>();
+      allSimilarities.forEach((s) => {
+        chapterIds.add(s.sourceChapterId);
+        chapterIds.add(s.destChapterId);
+      });
+
+      // Get chapter details
+      const chaptersData = await db
+        .select({
+          id: chapters.id,
+          chapterVideoId: chapters.videoId,
+          chapterIdx: chapters.chapterIdx,
+          chapterName: chapters.chapterName,
+          chapterSummary: chapters.chapterSummary,
+          startTime: chapters.startTime,
+          endTime: chapters.endTime,
+          videoId: videos.id,
+          videoYoutubeId: videos.youtubeId,
+          videoTitle: videos.title,
+        })
+        .from(chapters)
+        .innerJoin(videos, eq(chapters.videoId, videos.id))
+        .where(inArray(chapters.id, Array.from(chapterIds)));
+
+      // Filter by video if specified
+      const filteredChapters = input.videoId
+        ? chaptersData.filter((c) => c.videoId === input.videoId)
+        : chaptersData;
+
+      // Filter similarities to only include chapters we have
+      const filteredChapterIds = new Set(filteredChapters.map((c) => c.id));
+      const filteredSimilarities = allSimilarities.filter(
+        (s) =>
+          filteredChapterIds.has(s.sourceChapterId) &&
+          filteredChapterIds.has(s.destChapterId),
+      );
+
+      // Convert to Cytoscape format
+      const nodes = filteredChapters.map((chapter) => ({
+        data: {
+          id: chapter.id.toString(),
+          label: chapter.chapterName,
+          videoId: chapter.videoId,
+          youtubeId: chapter.videoYoutubeId,
+          videoTitle: chapter.videoTitle,
+          chapterName: chapter.chapterName,
+          chapterSummary: chapter.chapterSummary,
+          startTime: chapter.startTime,
+          endTime: chapter.endTime,
+          duration: chapter.endTime - chapter.startTime,
+        },
+      }));
+
+      const edges = filteredSimilarities.map((similarity) => ({
+        data: {
+          id: `${similarity.sourceChapterId}-${similarity.destChapterId}`,
+          source: similarity.sourceChapterId.toString(),
+          target: similarity.destChapterId.toString(),
+          similarityScore: similarity.similarityScore,
+          weight: similarity.similarityScore,
+        },
+      }));
+
+      return {
+        nodes,
+        edges,
+        stats: {
+          totalNodes: nodes.length,
+          totalEdges: edges.length,
+          averageSimilarity:
+            edges.length > 0
+              ? edges.reduce(
+                  (sum, edge) => sum + edge.data.similarityScore,
+                  0,
+                ) / edges.length
+              : 0,
+        },
+      };
+    }),
+
+  // Get chapter details by ID
+  getChapterDetails: publicProcedure
+    .input(z.object({ chapterId: z.number() }))
+    .query(async ({ input }) => {
+      const chapter = await db
+        .select({
+          id: chapters.id,
+          videoId: chapters.videoId,
+          chapterIdx: chapters.chapterIdx,
+          chapterName: chapters.chapterName,
+          chapterSummary: chapters.chapterSummary,
+          startTime: chapters.startTime,
+          endTime: chapters.endTime,
+          videoYoutubeId: videos.youtubeId,
+          videoTitle: videos.title,
+        })
+        .from(chapters)
+        .innerJoin(videos, eq(chapters.videoId, videos.id))
+        .where(eq(chapters.id, input.chapterId))
+        .limit(1);
+
+      if (chapter.length === 0) {
+        throw new Error("Chapter not found");
+      }
+
+      const chapterData = chapter[0]!;
+      return {
+        id: chapterData.id,
+        videoId: chapterData.videoId,
+        youtubeId: chapterData.videoYoutubeId,
+        videoTitle: chapterData.videoTitle,
+        chapterName: chapterData.chapterName,
+        chapterSummary: chapterData.chapterSummary,
+        startTime: chapterData.startTime,
+        endTime: chapterData.endTime,
+        duration: chapterData.endTime - chapterData.startTime,
       };
     }),
 });

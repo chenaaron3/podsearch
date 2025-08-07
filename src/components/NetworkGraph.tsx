@@ -3,75 +3,68 @@
 import cytoscape from 'cytoscape';
 import coseBilkent from 'cytoscape-cose-bilkent';
 import dagre from 'cytoscape-dagre';
+import { ChevronDown, ChevronRight, FileText, Folder, X } from 'lucide-react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '~/utils/api';
 
-import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
-import { Separator } from './ui/separator';
-import { Slider } from './ui/slider';
+
+import type { NetworkGraphData, ChapterDetails } from '~/types/network-graph';
 
 // Register Cytoscape extensions
 cytoscape.use(dagre);
 cytoscape.use(coseBilkent);
 
-interface NetworkGraphProps {
-    videoId?: number;
-}
+// Cluster colors for visualization
+const clusterColors = [
+    '#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6',
+    '#06b6d4', '#84cc16', '#f97316', '#ec4899', '#6366f1',
+    '#14b8a6', '#f43f5e', '#a855f7', '#0ea5e9', '#22c55e',
+    '#eab308', '#f97316', '#06b6d4', '#8b5cf6', '#ec4899'
+];
 
 interface NodeData {
     id: string;
     label: string;
-    videoId: number;
-    videoTitle: string;
-    chapterName: string;
-    chapterSummary: string;
-    startTime: number;
-    endTime: number;
-    duration: number;
 }
 
-interface EdgeData {
+interface HierarchyNode {
     id: string;
-    source: string;
-    target: string;
-    similarityScore: number;
-    weight: number;
+    name: string;
+    label?: string;
+    size: number;
+    level: number;
+    children?: HierarchyNode[];
+    nodes?: string[];
+    cluster_id?: number;
+    type: 'leaf' | 'intermediate';
 }
 
-interface NetworkData {
-    nodes: { data: NodeData }[];
-    edges: { data: EdgeData }[];
-    stats: {
-        totalNodes: number;
-        totalEdges: number;
-        averageSimilarity: number;
+interface HierarchyData {
+    tree: HierarchyNode;
+    statistics: {
+        total_clusters: number;
+        total_nodes: number;
+        largest_cluster: number;
+        smallest_cluster: number;
+        average_cluster_size: number;
     };
 }
 
-export default function NetworkGraph({ videoId }: NetworkGraphProps) {
+export default function NetworkGraph() {
     const containerRef = useRef<HTMLDivElement>(null);
     const cyRef = useRef<cytoscape.Core | null>(null);
-    const [similarityThreshold, setSimilarityThreshold] = useState(0.5);
-    const [selectedNode, setSelectedNode] = useState<NodeData | null>(null);
+    const [selectedNode, setSelectedNode] = useState<ChapterDetails | null>(null);
     const [isLoading, setIsLoading] = useState(false);
-    const [layout, setLayout] = useState<'cose-bilkent' | 'dagre' | 'random'>('cose-bilkent');
-
-    // Fetch network data
-    const { data: networkData, refetch } = api.chapters.getNetworkData.useQuery(
-        {
-            similarityThreshold,
-            limit: 1000,
-            videoId,
-        },
-        {
-            enabled: false, // We'll manually trigger this
-        }
-    );
+    const [networkData, setNetworkData] = useState<NetworkGraphData | null>(null);
+    const [hierarchyData, setHierarchyData] = useState<HierarchyData | null>(null);
+    const [showHierarchy, setShowHierarchy] = useState(true);
+    const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set(['root']));
+    const [selectedClusterId, setSelectedClusterId] = useState<number | null>(null);
 
     // Initialize Cytoscape
-    const initializeCytoscape = useCallback((data: NetworkData) => {
+    const initializeCytoscape = useCallback((data: NetworkGraphData) => {
         if (!containerRef.current) return;
 
         // Destroy existing instance
@@ -79,30 +72,61 @@ export default function NetworkGraph({ videoId }: NetworkGraphProps) {
             cyRef.current.destroy();
         }
 
+        // Get visible elements based on hierarchy state
+        const visibleNodes = getVisibleNodes();
+        const visibleEdges = getVisibleEdges(visibleNodes);
+
         // Create new instance
         cyRef.current = cytoscape({
             container: containerRef.current,
             elements: {
-                nodes: data.nodes,
-                edges: data.edges,
+                nodes: visibleNodes,
+                edges: visibleEdges,
             },
             style: [
                 {
                     selector: 'node',
                     style: {
-                        'background-color': '#3b82f6',
+                        'background-color': (ele: any) => {
+                            const clusterId = ele.data('clusterId');
+                            return clusterColors[clusterId % clusterColors.length] || '#3b82f6';
+                        },
                         'border-color': '#1e40af',
                         'border-width': 2,
                         'color': '#ffffff',
-                        'label': 'data(label)',
+                        'label': (ele: any) => {
+                            const nodeData = ele.data();
+                            if (nodeData.isBlob) {
+                                return `${nodeData.label} (${nodeData.nodeCount})`;
+                            }
+                            return nodeData.label;
+                        },
                         'text-valign': 'center',
                         'text-halign': 'center',
                         'text-wrap': 'wrap',
                         'text-max-width': 120,
                         'font-size': 10,
                         'font-weight': 'bold',
-                        'width': '60px',
-                        'height': '60px',
+                        'width': (ele: any) => {
+                            const nodeData = ele.data();
+                            if (nodeData.isBlob) {
+                                // Proportional size based on node count, with min/max bounds
+                                const baseSize = 60;
+                                const sizeMultiplier = Math.min(Math.max(nodeData.nodeCount / 10, 1), 4);
+                                return `${baseSize * sizeMultiplier}px`;
+                            }
+                            return '60px';
+                        },
+                        'height': (ele: any) => {
+                            const nodeData = ele.data();
+                            if (nodeData.isBlob) {
+                                // Proportional size based on node count, with min/max bounds
+                                const baseSize = 60;
+                                const sizeMultiplier = Math.min(Math.max(nodeData.nodeCount / 10, 1), 4);
+                                return `${baseSize * sizeMultiplier}px`;
+                            }
+                            return '60px';
+                        },
                         'shape': 'ellipse',
                     },
                 },
@@ -137,28 +161,7 @@ export default function NetworkGraph({ videoId }: NetworkGraphProps) {
                 },
             ],
             layout: {
-                name: layout,
-                animate: true,
-                animationDuration: 1000,
-                ...(layout === 'dagre' && {
-                    rankDir: 'TB',
-                    nodeDimensionsIncludeLabels: true,
-                }),
-                ...(layout === 'cose-bilkent' && {
-                    nodeDimensionsIncludeLabels: true,
-                    idealEdgeLength: 100,
-                    nodeRepulsion: 4500,
-                    gravity: 0.25,
-                    gravityRange: 1.01,
-                    gravityRangeCompound: 1.5,
-                    gravityCompound: 1.0,
-                    gravityNodeEdge: 0.25,
-                    gravityEdge: 0.25,
-                    gravityRangeEdge: 0.5,
-                    gravityEdgeCompound: 1.0,
-                    gravityRangeEdgeCompound: 0.5,
-                    initialEnergyOnIncremental: 0.3,
-                }),
+                name: 'cose-bilkent',
             },
             userZoomingEnabled: true,
             userPanningEnabled: true,
@@ -175,79 +178,85 @@ export default function NetworkGraph({ videoId }: NetworkGraphProps) {
         cyRef.current.on('tap', 'node', (evt) => {
             const node = evt.target;
             const nodeData = node.data() as NodeData;
-            setSelectedNode(nodeData);
-        });
 
-        cyRef.current.on('tap', (evt) => {
-            if (evt.target === cyRef.current) {
-                setSelectedNode(null);
+            // Check if this is a blob node that can be expanded
+            if (isNodeBlob(nodeData.id)) {
+                // Extract hierarchy node ID from blob ID
+                const hierarchyNodeId = nodeData.id.replace('blob_', '');
+                toggleNodeExpansion(hierarchyNodeId);
+            } else {
+                // Normal node selection
+                setSelectedChapterId(parseInt(nodeData.id));
             }
         });
 
         // Fit to view
         cyRef.current.fit();
-    }, [layout]);
+    }, []);
 
-    // Load data and initialize graph
+    // State for fetching chapter details
+    const [selectedChapterId, setSelectedChapterId] = useState<number | null>(null);
+
+    // Fetch chapter details on demand
+    const { data: chapterDetails, isLoading: isLoadingDetails } = api.chapters.getChapterDetails.useQuery(
+        { chapterId: selectedChapterId! },
+        { enabled: !!selectedChapterId }
+    );
+
+    // Update selected node when chapter details are loaded
+    useEffect(() => {
+        if (chapterDetails) {
+            setSelectedNode(chapterDetails);
+        }
+    }, [chapterDetails]);
+
+    // Load static network data
     const loadGraph = useCallback(async () => {
         setIsLoading(true);
         try {
-            const result = await refetch();
-            if (result.data) {
-                initializeCytoscape(result.data);
+            // Import the static JSON file
+            const response = await fetch('/network-graph.json');
+            if (!response.ok) {
+                throw new Error(`Failed to load network graph: ${response.statusText}`);
             }
+            const data: NetworkGraphData = await response.json();
+            setNetworkData(data);
+            initializeCytoscape(data);
         } catch (error) {
             console.error('Error loading graph data:', error);
         } finally {
             setIsLoading(false);
         }
-    }, [refetch, initializeCytoscape]);
+    }, [initializeCytoscape]);
 
     // Initial load
     useEffect(() => {
         loadGraph();
     }, [loadGraph]);
 
-    // Reload when threshold changes
+    // Load hierarchy data
     useEffect(() => {
-        loadGraph();
-    }, [similarityThreshold, loadGraph]);
+        const loadHierarchyData = async () => {
+            try {
+                // Try labeled hierarchy first, fallback to regular hierarchy
+                let response = await fetch('/labeled-hierarchy.json');
+                if (!response.ok) {
+                    response = await fetch('/hierarchy.json');
+                }
 
-    // Change layout
-    const changeLayout = (newLayout: typeof layout) => {
-        setLayout(newLayout);
-        if (cyRef.current && networkData) {
-            cyRef.current.layout({
-                name: newLayout,
-                animate: true,
-                animationDuration: 1000,
-                ...(newLayout === 'dagre' && {
-                    rankDir: 'TB',
-                    nodeDimensionsIncludeLabels: true,
-                }),
-                ...(newLayout === 'cose-bilkent' && {
-                    nodeDimensionsIncludeLabels: true,
-                    idealEdgeLength: 100,
-                    nodeRepulsion: 4500,
-                    gravity: 0.25,
-                    gravityRange: 1.01,
-                    gravityRangeCompound: 1.5,
-                    gravityCompound: 1.0,
-                    gravityNodeEdge: 0.25,
-                    gravityEdge: 0.25,
-                    gravityRangeEdge: 0.5,
-                    gravityEdgeCompound: 1.0,
-                    gravityRangeEdgeCompound: 0.5,
-                    initialEnergyOnIncremental: 0.3,
-                }),
-            }).run();
-        }
-    };
+                if (response.ok) {
+                    const data: HierarchyData = await response.json();
+                    setHierarchyData(data);
+                }
+            } catch (error) {
+                console.warn('Could not load hierarchy data:', error);
+            }
+        };
 
-    // Zoom controls
-    const zoomIn = () => cyRef.current?.zoom({ level: cyRef.current.zoom() * 1.2, renderedPosition: { x: 0, y: 0 } });
-    const zoomOut = () => cyRef.current?.zoom({ level: cyRef.current.zoom() * 0.8, renderedPosition: { x: 0, y: 0 } });
-    const fitView = () => cyRef.current?.fit();
+        loadHierarchyData();
+    }, []);
+
+
 
     // Format time
     const formatTime = (seconds: number) => {
@@ -256,133 +265,396 @@ export default function NetworkGraph({ videoId }: NetworkGraphProps) {
         return `${mins}:${secs.toString().padStart(2, '0')}`;
     };
 
-    return (
-        <div className="w-full h-full flex flex-col">
-            {/* Controls */}
-            <Card className="mb-4">
-                <CardHeader>
-                    <CardTitle className="text-lg">Network Controls</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                    <div className="space-y-2">
-                        <label className="text-sm font-medium">
-                            Similarity Threshold: {similarityThreshold.toFixed(2)}
-                        </label>
-                        <Slider
-                            value={[similarityThreshold]}
-                            onValueChange={(value: number[]) => setSimilarityThreshold(value[0] || 0.5)}
-                            min={0}
-                            max={1}
-                            step={0.01}
-                            className="w-full"
-                        />
-                    </div>
+    // Handle view video click
+    const handleViewVideo = (chapterDetails: ChapterDetails) => {
+        // Open video in new tab with timestamp
+        const videoUrl = `https://www.youtube.com/watch?v=${chapterDetails.youtubeId}&t=${Math.floor(chapterDetails.startTime)}`;
+        window.open(videoUrl, '_blank');
+    };
 
-                    <div className="flex gap-2">
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => changeLayout('cose-bilkent')}
-                            disabled={layout === 'cose-bilkent'}
-                        >
-                            Force Layout
-                        </Button>
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => changeLayout('dagre')}
-                            disabled={layout === 'dagre'}
-                        >
-                            Hierarchical
-                        </Button>
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => changeLayout('random')}
-                            disabled={layout === 'random'}
-                        >
-                            Random
-                        </Button>
-                    </div>
+    const handleClusterSelect = (clusterId: number) => {
+        setSelectedClusterId(clusterId);
+        // TODO: Highlight the selected cluster in the network graph
+        console.log('Selected cluster:', clusterId);
+    };
 
-                    <div className="flex gap-2">
-                        <Button variant="outline" size="sm" onClick={zoomIn}>
-                            Zoom In
-                        </Button>
-                        <Button variant="outline" size="sm" onClick={zoomOut}>
-                            Zoom Out
-                        </Button>
-                        <Button variant="outline" size="sm" onClick={fitView}>
-                            Fit View
-                        </Button>
-                        <Button variant="outline" size="sm" onClick={loadGraph} disabled={isLoading}>
-                            {isLoading ? 'Loading...' : 'Refresh'}
-                        </Button>
-                    </div>
+    const toggleNodeExpansion = (nodeId: string) => {
+        setExpandedNodes(prev => {
+            const newSet = new Set(prev);
+            if (newSet.has(nodeId)) {
+                newSet.delete(nodeId);
+            } else {
+                newSet.add(nodeId);
+            }
+            return newSet;
+        });
+    };
 
-                    {networkData && (
-                        <div className="flex gap-4 text-sm">
-                            <Badge variant="secondary">
-                                Nodes: {networkData.stats.totalNodes}
-                            </Badge>
-                            <Badge variant="secondary">
-                                Edges: {networkData.stats.totalEdges}
-                            </Badge>
-                            <Badge variant="secondary">
-                                Avg Similarity: {networkData.stats.averageSimilarity.toFixed(3)}
-                            </Badge>
+    const getVisibleNodes = useCallback(() => {
+        if (!hierarchyData || !networkData) return networkData?.nodes || [];
+
+        console.log('Hierarchy tree children count:', hierarchyData.tree.children?.length);
+        console.log('Expanded nodes:', Array.from(expandedNodes));
+
+        const visibleNodes: any[] = [];
+        const blobNodes: any[] = [];
+
+        const traverseHierarchy = (node: HierarchyNode) => {
+            // Handle root node specially
+            if (node.id === 'root') {
+                if (node.children) {
+                    node.children.forEach(child => traverseHierarchy(child));
+                }
+                return;
+            }
+
+            if (node.type === 'leaf') {
+                // Leaf nodes - show individual chapters
+                if (node.nodes) {
+                    node.nodes.forEach(nodeId => {
+                        const originalNode = networkData.nodes.find(n => n.data.id === nodeId);
+                        if (originalNode) {
+                            visibleNodes.push(originalNode);
+                        }
+                    });
+                }
+            } else if (node.children) {
+                // Intermediate nodes
+                if (expandedNodes.has(node.id)) {
+                    // If expanded, show children
+                    node.children.forEach(child => traverseHierarchy(child));
+                } else {
+                    // If collapsed, create a blob node proportional to size
+                    // For intermediate nodes, we need to collect all leaf nodes under them
+                    const collectLeafNodes = (hNode: HierarchyNode): string[] => {
+                        if (hNode.type === 'leaf' && hNode.nodes) {
+                            return hNode.nodes;
+                        } else if (hNode.children) {
+                            return hNode.children.flatMap(collectLeafNodes);
+                        }
+                        return [];
+                    };
+
+                    const leafNodes = collectLeafNodes(node);
+                    if (leafNodes.length > 0) {
+                        // Create a blob node representing the collapsed cluster
+                        const blobNode = {
+                            data: {
+                                id: `blob_${node.id}`,
+                                label: node.label || node.name,
+                                clusterId: node.cluster_id || 0,
+                                nodeCount: node.size,
+                                isBlob: true,
+                                originalNodes: leafNodes
+                            }
+                        };
+                        blobNodes.push(blobNode);
+                    }
+                }
+            }
+        };
+
+        traverseHierarchy(hierarchyData.tree);
+
+        // Debug logging
+        console.log('Visible nodes:', visibleNodes.length);
+        console.log('Blob nodes:', blobNodes.length);
+        console.log('Blob nodes:', blobNodes.map(b => ({ id: b.data.id, label: b.data.label, size: b.data.nodeCount })));
+
+        // Return both individual nodes and blob nodes
+        return [...visibleNodes, ...blobNodes];
+    }, [hierarchyData, networkData, expandedNodes]);
+
+    const getVisibleEdges = useCallback((visibleNodes: any[] = []) => {
+        if (!hierarchyData || !networkData) return networkData?.edges || [];
+
+        const visibleNodeIds = new Set<string>();
+        const blobNodeIds = new Set<string>();
+
+        const traverseHierarchy = (node: HierarchyNode) => {
+            // Handle root node specially
+            if (node.id === 'root') {
+                if (node.children) {
+                    node.children.forEach(child => traverseHierarchy(child));
+                }
+                return;
+            }
+
+            if (node.type === 'leaf') {
+                if (node.nodes) {
+                    node.nodes.forEach(nodeId => visibleNodeIds.add(nodeId));
+                }
+            } else if (node.children) {
+                if (expandedNodes.has(node.id)) {
+                    node.children.forEach(child => traverseHierarchy(child));
+                } else {
+                    // For intermediate nodes, collect all leaf nodes
+                    const collectLeafNodes = (hNode: HierarchyNode): string[] => {
+                        if (hNode.type === 'leaf' && hNode.nodes) {
+                            return hNode.nodes;
+                        } else if (hNode.children) {
+                            return hNode.children.flatMap(collectLeafNodes);
+                        }
+                        return [];
+                    };
+
+                    const leafNodes = collectLeafNodes(node);
+                    if (leafNodes.length > 0) {
+                        // Add blob node ID
+                        blobNodeIds.add(`blob_${node.id}`);
+                        // Also add original nodes for edge calculations
+                        leafNodes.forEach(nodeId => visibleNodeIds.add(nodeId));
+                    }
+                }
+            }
+        };
+
+        traverseHierarchy(hierarchyData.tree);
+
+        // Get the actual visible node IDs from the visibleNodes array
+        const actualVisibleNodeIds = new Set(visibleNodes.map(node => node.data.id));
+
+        // Only show edges between nodes that are actually in the visibleNodes array
+        const visibleEdges = networkData.edges.filter(edge =>
+            actualVisibleNodeIds.has(edge.data.source) && actualVisibleNodeIds.has(edge.data.target)
+        );
+
+        // For now, only show edges between visible individual nodes, not between blobs
+        // This prevents the "nonexistent source" error
+        return visibleEdges;
+    }, [hierarchyData, networkData, expandedNodes]);
+
+    const isNodeBlob = useCallback((nodeId: string): boolean => {
+        return nodeId.startsWith('blob_');
+    }, []);
+
+    // Update graph when hierarchy state changes
+    useEffect(() => {
+        if (cyRef.current && networkData && hierarchyData) {
+            const visibleNodes = getVisibleNodes();
+            const visibleEdges = getVisibleEdges(visibleNodes);
+
+            // Update graph elements
+            cyRef.current.elements().remove();
+            cyRef.current.add(visibleNodes);
+            cyRef.current.add(visibleEdges);
+
+            // Reapply layout
+            cyRef.current.layout({ name: 'cose-bilkent' }).run();
+            cyRef.current.fit();
+        }
+    }, [expandedNodes, networkData, hierarchyData, getVisibleNodes, getVisibleEdges]);
+
+    // TreeNode component for hierarchy view
+    const TreeNode: React.FC<{ node: HierarchyNode; level: number }> = ({ node, level }) => {
+        const isExpanded = expandedNodes.has(node.id);
+        const hasChildren = node.children && node.children.length > 0;
+        const isLeaf = node.type === 'leaf';
+
+        const handleToggle = () => {
+            if (hasChildren) {
+                toggleNodeExpansion(node.id);
+            }
+        };
+
+        const handleClusterClick = () => {
+            if (isLeaf && node.cluster_id !== undefined) {
+                handleClusterSelect(node.cluster_id);
+            }
+        };
+
+        const getNodeColor = (level: number) => {
+            const colors = [
+                'text-blue-600', 'text-green-600', 'text-purple-600',
+                'text-orange-600', 'text-red-600', 'text-indigo-600'
+            ];
+            return colors[level % colors.length];
+        };
+
+        return (
+            <div className="select-none">
+                <div
+                    className={`flex items-center py-1 px-2 hover:bg-gray-50 rounded cursor-pointer ${isLeaf ? 'hover:bg-blue-50' : ''
+                        }`}
+                    style={{ paddingLeft: `${level * 16 + 8}px` }}
+                    onClick={isLeaf ? handleClusterClick : handleToggle}
+                >
+                    {hasChildren && (
+                        <div className="mr-1">
+                            {isExpanded ? (
+                                <ChevronDown className="h-4 w-4 text-gray-500" />
+                            ) : (
+                                <ChevronRight className="h-4 w-4 text-gray-500" />
+                            )}
                         </div>
                     )}
-                </CardContent>
-            </Card>
 
-            {/* Graph Container */}
-            <div className="flex-1 relative">
-                <div
-                    ref={containerRef}
-                    className="w-full h-full border rounded-lg bg-white"
-                    style={{ minHeight: '600px' }}
-                />
+                    <div className="mr-2">
+                        {isLeaf ? (
+                            <FileText className="h-4 w-4 text-blue-500" />
+                        ) : (
+                            <Folder className="h-4 w-4 text-yellow-500" />
+                        )}
+                    </div>
 
-                {/* Loading overlay */}
-                {isLoading && (
-                    <div className="absolute inset-0 bg-white/80 flex items-center justify-center">
-                        <div className="text-lg">Loading network data...</div>
+                    <div className="flex-1">
+                        <span
+                            className={`font-medium ${getNodeColor(level)}`}
+                            title={node.label && node.label !== node.name ? node.name : undefined}
+                        >
+                            {node.label || node.name}
+                        </span>
+                        <span className="text-sm text-gray-600 ml-2">
+                            ({node.size} nodes)
+                        </span>
+                        {!isLeaf && !isExpanded && (
+                            <span className="text-xs text-blue-500 ml-1">
+                                🔵
+                            </span>
+                        )}
+                    </div>
+                </div>
+
+                {hasChildren && isExpanded && (
+                    <div>
+                        {node.children!.map((child) => (
+                            <TreeNode
+                                key={child.id}
+                                node={child}
+                                level={level + 1}
+                            />
+                        ))}
                     </div>
                 )}
             </div>
+        );
+    };
 
-            {/* Node Details Panel */}
-            {selectedNode && (
-                <Card className="mt-4">
-                    <CardHeader>
-                        <CardTitle className="text-lg">Chapter Details</CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                        <div>
-                            <h3 className="font-semibold text-lg">{selectedNode.chapterName}</h3>
-                            <p className="text-sm text-gray-600">{selectedNode.videoTitle}</p>
+    return (
+        <div className="w-full h-full relative">
+            {/* Graph Container */}
+            <div
+                ref={containerRef}
+                className="w-full h-full bg-white"
+            />
+
+            {/* Loading overlay */}
+            {isLoading && (
+                <div className="absolute inset-0 bg-white/80 flex items-center justify-center">
+                    <div className="text-center">
+                        <div className="text-lg mb-2">Loading network graph...</div>
+                        <div className="text-sm text-gray-600">Loading static network data</div>
+                    </div>
+                </div>
+            )}
+
+            {/* Cluster Overview Panel */}
+            {networkData && (
+                <div className="absolute top-4 left-4 bg-white/90 backdrop-blur-sm rounded-lg p-4 max-w-sm max-h-96 overflow-y-auto">
+                    <div className="flex items-center justify-between mb-2">
+                        <h3 className="font-semibold text-lg">Clusters ({networkData.clusters.length})</h3>
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setShowHierarchy(!showHierarchy)}
+                            className="text-xs"
+                        >
+                            {showHierarchy ? 'List' : 'Tree'}
+                        </Button>
+                    </div>
+
+                    {showHierarchy && hierarchyData ? (
+                        <div className="space-y-2">
+                            <TreeNode node={hierarchyData.tree} level={0} />
                         </div>
-
-                        <Separator />
-
-                        <div className="grid grid-cols-2 gap-4 text-sm">
-                            <div>
-                                <span className="font-medium">Duration:</span>
-                                <span className="ml-2">{formatTime(selectedNode.duration)}</span>
-                            </div>
-                            <div>
-                                <span className="font-medium">Start Time:</span>
-                                <span className="ml-2">{formatTime(selectedNode.startTime)}</span>
-                            </div>
+                    ) : (
+                        <div className="space-y-2">
+                            {networkData.clusters
+                                .sort((a, b) => b.size - a.size) // Sort by size descending
+                                .slice(0, 10)
+                                .map((cluster) => (
+                                    <div key={cluster.clusterId} className="flex items-center justify-between text-sm">
+                                        <div className="flex items-center space-x-2">
+                                            <div
+                                                className="w-3 h-3 rounded-full"
+                                                style={{
+                                                    backgroundColor: clusterColors[cluster.clusterId % clusterColors.length] || '#3b82f6'
+                                                }}
+                                            />
+                                            <span>Cluster {cluster.clusterId}</span>
+                                        </div>
+                                        <span className="text-gray-600">{cluster.size} nodes</span>
+                                    </div>
+                                ))}
+                            {networkData.clusters.length > 10 && (
+                                <div className="text-xs text-gray-500">
+                                    +{networkData.clusters.length - 10} more clusters
+                                </div>
+                            )}
                         </div>
+                    )}
+                </div>
+            )}
 
-                        <div>
-                            <span className="font-medium text-sm">Summary:</span>
-                            <p className="text-sm text-gray-700 mt-1">{selectedNode.chapterSummary}</p>
-                        </div>
-                    </CardContent>
-                </Card>
+            {/* Node Details Modal */}
+            {(selectedNode || isLoadingDetails) && (
+                <div className="absolute inset-0 bg-black/20 flex items-start justify-end p-4 pointer-events-none">
+                    <Card className="w-96 max-h-[80vh] overflow-y-auto pointer-events-auto">
+                        <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-2">
+                            <CardTitle className="text-lg">Chapter Details</CardTitle>
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => {
+                                    setSelectedNode(null);
+                                    setSelectedChapterId(null);
+                                }}
+                                className="h-6 w-6 p-0"
+                            >
+                                <X className="h-4 w-4" />
+                            </Button>
+                        </CardHeader>
+                        <CardContent className="space-y-4">
+                            {isLoadingDetails ? (
+                                <div className="text-center py-8">
+                                    <div className="text-sm text-gray-600">Loading chapter details...</div>
+                                </div>
+                            ) : selectedNode ? (
+                                <>
+                                    <div>
+                                        <h3 className="font-semibold text-lg mb-1">{selectedNode.chapterName}</h3>
+                                        <p className="text-sm text-gray-600">{selectedNode.videoTitle}</p>
+                                    </div>
+
+                                    <div className="space-y-2">
+                                        <div className="flex justify-between text-sm">
+                                            <span className="font-medium">Start Time:</span>
+                                            <span>{formatTime(selectedNode.startTime)}</span>
+                                        </div>
+                                        <div className="flex justify-between text-sm">
+                                            <span className="font-medium">Duration:</span>
+                                            <span>{formatTime(selectedNode.duration)}</span>
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <span className="font-medium text-sm">Summary:</span>
+                                        <p className="text-sm text-gray-700 mt-1 leading-relaxed">
+                                            {selectedNode.chapterSummary}
+                                        </p>
+                                    </div>
+
+                                    <Button
+                                        onClick={() => selectedNode && handleViewVideo(selectedNode)}
+                                        className="w-full"
+                                    >
+                                        View Video
+                                    </Button>
+                                </>
+                            ) : null}
+                        </CardContent>
+                    </Card>
+                </div>
             )}
         </div>
     );
