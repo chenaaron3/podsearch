@@ -120,8 +120,6 @@ async function getTranscriptFromAPI(
   }
 
   const rawData = (await transcriptResponse.json()) as TranscriptApiData;
-  console.log("📄 Raw response type:", typeof rawData);
-  console.log("📄 Raw response:", JSON.stringify(rawData, null, 2));
 
   // Type guard to ensure we have the expected structure
   if (!Array.isArray(rawData) || rawData.length === 0) {
@@ -129,12 +127,6 @@ async function getTranscriptFromAPI(
   }
 
   const transcriptData = rawData;
-  console.log(
-    "📄 Complete Transcript API response:",
-    JSON.stringify(transcriptData, null, 2),
-  );
-  console.log("📄 Response type:", typeof transcriptData);
-  console.log("📄 Response keys:", Object.keys(transcriptData || {}));
 
   if (
     !transcriptData ||
@@ -149,16 +141,12 @@ async function getTranscriptFromAPI(
     throw new Error("No video data available");
   }
 
-  console.log(`📄 Video ID in response: ${videoData.id}`);
-  console.log(`📄 Video title: ${videoData.title}`);
-
   if (!videoData.tracks) {
     throw new Error("No transcript tracks available for this video");
   }
 
   // Extract transcript from the tracks array
   const tracks: TranscriptTrack[] = videoData.tracks || [];
-  console.log(`📄 Number of tracks: ${tracks.length}`);
 
   // Prefer English; otherwise, just pick the first track
   const englishTrack = tracks.find((track: TranscriptTrack) =>
@@ -171,12 +159,9 @@ async function getTranscriptFromAPI(
     throw new Error("No transcript content available for this video");
   }
 
+  console.log(selectedTrack);
+
   const transcript: TranscriptSegment[] = selectedTrack.transcript;
-  const usedEnglish = Boolean(englishTrack && selectedTrack === englishTrack);
-  console.log(
-    `📄 Using ${usedEnglish ? "English" : "fallback"} track: "${selectedTrack.language}"`,
-  );
-  console.log(`📄 Transcript segments: ${transcript.length}`);
 
   if (!transcript || transcript.length === 0) {
     throw new Error("No transcript content available for this video");
@@ -191,18 +176,9 @@ function postprocessTranscript(
   timestamp: number,
   duration: number,
 ): string {
-  console.log(
-    `⏰ Postprocessing transcript for timestamp: ${timestamp}s, duration: ${duration}s`,
-  );
-
   // Calculate the time range
   const startTimeSeconds = Math.max(0, timestamp - duration);
   const endTimeSeconds = timestamp + 5;
-
-  console.log(
-    `⏰ Extracting transcript from ${startTimeSeconds}s to ${endTimeSeconds}s`,
-  );
-  console.log(`📄 Total transcript segments: ${transcript.length}`);
 
   const relevantSegments = transcript.filter((segment: TranscriptSegment) => {
     // Convert string timestamps to numbers
@@ -210,20 +186,11 @@ function postprocessTranscript(
     const segmentDuration = parseFloat(segment.dur) || 0;
     const segmentEnd = segmentStart + segmentDuration;
 
-    console.log(
-      `📄 Segment: start=${segmentStart}s, end=${segmentEnd}s, text="${segment.text.slice(0, 50)}..."`,
-    );
-
     // Check if segment overlaps with our time range
     const isRelevant =
       segmentStart <= endTimeSeconds && segmentEnd >= startTimeSeconds;
-    if (isRelevant) {
-      console.log(`✅ Segment is relevant!`);
-    }
     return isRelevant;
   });
-
-  console.log(`📄 Relevant segments found: ${relevantSegments.length}`);
 
   if (relevantSegments.length === 0) {
     console.log("⚠️ No transcript segments found in the specified time range");
@@ -231,19 +198,10 @@ function postprocessTranscript(
   }
 
   // Extract text from relevant segments
-  console.log(`📄 Processing ${relevantSegments.length} relevant segments:`);
-  relevantSegments.forEach((segment: TranscriptSegment, index: number) => {
-    console.log(`📄 Segment ${index + 1}: "${segment.text}"`);
-  });
-
   const transcriptText = relevantSegments
     .map((segment: TranscriptSegment) => segment.text)
     .join(" ")
     .trim();
-
-  console.log(
-    `✅ Successfully postprocessed transcript: "${transcriptText.slice(0, 100)}..."`,
-  );
 
   return transcriptText;
 }
@@ -252,8 +210,6 @@ function postprocessTranscript(
 async function formatTranscriptWithGPT(
   transcriptText: string,
 ): Promise<string> {
-  console.log(`🤖 Formatting transcript with GPT-4.1-nano`);
-
   const grammerPrompt = replacePromptPlaceholders(GRAMMER_PROMPT, {
     transcript: transcriptText,
   });
@@ -305,10 +261,6 @@ async function formatTranscriptWithGPT(
     throw new Error("Invalid grammer response format");
   }
 
-  console.log(
-    `✅ Successfully formatted transcript with GPT: "${enhancedTranscript.slice(0, 100)}..."`,
-  );
-
   return enhancedTranscript;
 }
 
@@ -322,8 +274,6 @@ async function storeTranscriptInDB(
   errorMessage?: string,
   processingTimeMs?: number,
 ): Promise<void> {
-  console.log(`💾 Storing transcript in database`);
-
   try {
     await db.insert(transcriptRequests).values({
       youtubeId,
@@ -334,10 +284,6 @@ async function storeTranscriptInDB(
       errorMessage,
       processingTimeMs,
     });
-
-    console.log(
-      `📊 Successfully logged transcript request: ${youtubeId} (${processingTimeMs}ms, success: ${success})`,
-    );
   } catch (logError) {
     console.error("❌ Failed to log transcript request:", logError);
     // Don't throw - logging failure shouldn't break the API response
