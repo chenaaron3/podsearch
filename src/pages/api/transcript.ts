@@ -68,12 +68,16 @@ async function getTranscriptFromAPI(
     `🔑 Using API key: ${env.YOUTUBE_TRANSCRIPT_API_KEY ? "Present" : "Missing"}`,
   );
 
+  const keys = env.YOUTUBE_TRANSCRIPT_API_KEY.split(",");
+  const key = keys[Math.floor(Math.random() * keys.length)];
+  console.log(key);
+
   const transcriptResponse = await fetch(
     "https://www.youtube-transcript.io/api/transcripts",
     {
       method: "POST",
       headers: {
-        Authorization: `Basic ${env.YOUTUBE_TRANSCRIPT_API_KEY}`,
+        Authorization: `Basic ${key}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -130,17 +134,22 @@ async function getTranscriptFromAPI(
   const tracks: TranscriptTrack[] = videoData.tracks || [];
   console.log(`📄 Number of tracks: ${tracks.length}`);
 
-  // Find the first English track (prefer auto-generated)
+  // Prefer English; otherwise, just pick the first track
   const englishTrack = tracks.find((track: TranscriptTrack) =>
     track.language?.toLowerCase().includes("en"),
   );
 
-  if (!englishTrack?.transcript) {
-    throw new Error("No English transcript available for this video");
+  const selectedTrack: TranscriptTrack | undefined = englishTrack ?? tracks[0];
+
+  if (!selectedTrack?.transcript || selectedTrack.transcript.length === 0) {
+    throw new Error("No transcript content available for this video");
   }
 
-  const transcript: TranscriptSegment[] = englishTrack.transcript;
-  console.log(`📄 Found English track: "${englishTrack.language}"`);
+  const transcript: TranscriptSegment[] = selectedTrack.transcript;
+  const usedEnglish = Boolean(englishTrack && selectedTrack === englishTrack);
+  console.log(
+    `📄 Using ${usedEnglish ? "English" : "fallback"} track: "${selectedTrack.language}"`,
+  );
   console.log(`📄 Transcript segments: ${transcript.length}`);
 
   if (!transcript || transcript.length === 0) {
