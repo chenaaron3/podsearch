@@ -30,7 +30,8 @@ export const videosRouter = createTRPCRouter({
           createdAt: videos.createdAt,
           updatedAt: videos.updatedAt,
         })
-        .from(videos);
+        .from(videos)
+        .$dynamic();
 
       // Apply filters
       if (input.status) {
@@ -70,7 +71,7 @@ export const videosRouter = createTRPCRouter({
         .where(eq(videos.id, input.id))
         .limit(1);
 
-      return video[0] || null;
+      return video[0] ?? null;
     }),
 
   // Get videos with chapters for network visualization
