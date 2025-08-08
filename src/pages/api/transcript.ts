@@ -54,6 +54,54 @@ interface GrammerOutput {
   transcript: string;
 }
 
+// Get transcript with retries
+async function getTranscriptWithRetries(
+  youtubeId: string,
+): Promise<Response | null> {
+  const MAX_RETRIES = 5;
+  let retries = 0;
+
+  const keys = env.YOUTUBE_TRANSCRIPT_API_KEY.split(",");
+  // Shuffle the keys
+  keys.sort(() => Math.random() - 0.5);
+
+  while (retries < MAX_RETRIES) {
+    try {
+      const key = keys[retries];
+      const transcriptResponse = await fetch(
+        "https://www.youtube-transcript.io/api/transcripts",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Basic ${key}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            ids: [youtubeId],
+          }),
+        },
+      );
+
+      if (transcriptResponse.ok) {
+        return transcriptResponse;
+      } else {
+        console.log("Failed key", key, transcriptResponse.status);
+        if (transcriptResponse.status === 429) {
+          throw new Error("Rate limit exceeded. Please try again later.");
+        } else if (transcriptResponse.status === 401) {
+          throw new Error("Invalid API key. Please check your credentials.");
+        } else if (transcriptResponse.status === 402) {
+          throw new Error("Payment required. Please upgrade your plan.");
+        }
+      }
+    } catch (error) {
+      // sleep for half a second
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  return null;
+}
+
 // Helper function 1: Get transcript from API
 async function getTranscriptFromAPI(
   youtubeId: string,
@@ -64,32 +112,9 @@ async function getTranscriptFromAPI(
     throw new Error("YouTube Transcript API key is not configured");
   }
 
-  console.log(
-    `🔑 Using API key: ${env.YOUTUBE_TRANSCRIPT_API_KEY ? "Present" : "Missing"}`,
-  );
-
-  const keys = env.YOUTUBE_TRANSCRIPT_API_KEY.split(",");
-  const key = keys[Math.floor(Math.random() * keys.length)];
-
-  const transcriptResponse = await fetch(
-    "https://www.youtube-transcript.io/api/transcripts",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${key}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        ids: [youtubeId],
-      }),
-    },
-  );
-
-  if (!transcriptResponse.ok) {
-    if (transcriptResponse.status === 429) {
-      throw new Error("Rate limit exceeded. Please try again later.");
-    }
-    throw new Error(`Transcript API error: ${transcriptResponse.status}`);
+  const transcriptResponse = await getTranscriptWithRetries(youtubeId);
+  if (!transcriptResponse) {
+    throw new Error("Failed to get transcript after 5 retries");
   }
 
   const rawData = (await transcriptResponse.json()) as TranscriptApiData;
