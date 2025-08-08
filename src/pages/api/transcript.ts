@@ -70,7 +70,6 @@ async function getTranscriptFromAPI(
 
   const keys = env.YOUTUBE_TRANSCRIPT_API_KEY.split(",");
   const key = keys[Math.floor(Math.random() * keys.length)];
-  console.log(key);
 
   const transcriptResponse = await fetch(
     "https://www.youtube-transcript.io/api/transcripts",
