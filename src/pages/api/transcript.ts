@@ -97,7 +97,7 @@ async function getTranscriptWithRetries(
     } catch (error) {
       console.error("Error fetching transcript:", error);
       // sleep for half a second
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 100));
       retries++;
     }
   }
